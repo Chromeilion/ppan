@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ppan"
+version = "0.1"
+description = "Piano performance video analysis."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    {name = "Uros Zivanovic", email = "uki@cro.moe"}
+]
+dependencies = [
+    'rach3datautils @ git+https://github.com/neosatrapahereje/rach3datautils.git',
+    'torch', 'torchvision', 'torchaudio', 'partitura'
+]
+
+[project.urls]
+Repository = "https://github.com/Chromeilion/ppan"
