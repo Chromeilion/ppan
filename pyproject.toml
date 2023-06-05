@@ -13,7 +13,8 @@ authors = [
 ]
 dependencies = [
     'rach3datautils @ git+https://github.com/neosatrapahereje/rach3datautils.git',
-    'torch', 'torchvision', 'torchaudio', 'partitura'
+    'torch', 'torchvision', 'torchaudio', 'partitura', 'tqdm', 'miditok',
+    'tokenizers', 'mido'
 ]
 
 [project.urls]

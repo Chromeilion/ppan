@@ -1,5 +1,5 @@
-Cython
-numpy
+Cython==0.29.35
+numpy==1.20.0
 scipy
 mido
 git+https://github.com/neosatrapahereje/rach3datautils@main#egg=rach3datautils
@@ -7,3 +7,7 @@ torch
 torchvision
 torchaudio
 av
+tqdm~=4.65.0
+miditok~=2.0.6
+miditoolkit~=0.1.16
+tokenizers~=0.13.3
