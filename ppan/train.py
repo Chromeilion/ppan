@@ -81,15 +81,16 @@ def main(dataset_dir: PathLike,
     loss_fn = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(params=model.parameters(), lr=lr)
     best_loss = torch.inf
+    global_step = 0
 
     if saved_model is not None:
         checkpoint = torch.load(saved_model)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         best_loss = checkpoint['loss']
+        global_step = checkpoint['step']
 
     model.train()
-    global_step = 0
     for epoch in tqdm(range(epochs), position=0):
         for batch in tqdm(loader, position=1):
             images = batch["video"].to(device)
@@ -138,7 +139,8 @@ def main(dataset_dir: PathLike,
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
-                            'loss': loss
+                            'loss': loss,
+                            'step': global_step
                             }, output
                         )
                     global_step += 1
