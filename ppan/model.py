@@ -71,13 +71,14 @@ class Decoder(nn.Module):
                 in_features=emb_dim,
                 out_features=n_tokens
             ),
-            nn.Softmax()
+            nn.Softmax(dim=1)
         )
 
-    def forward(self, tgt, memory, tgt_mask):
+    def forward(self, tgt, memory, tgt_mask, tgt_pad_mask):
         x = self.decoder(tgt=tgt,
                          memory=memory,
-                         tgt_mask=tgt_mask)
+                         tgt_mask=tgt_mask,
+                         tgt_key_padding_mask=tgt_pad_mask)
         x = self.head(x)
         return x
 
@@ -110,12 +111,14 @@ class PPAnModel(nn.Module):
             embedding_dim=emb_dim
         )
 
-    def forward(self, img: torch.Tensor, tgt: torch.Tensor):
+    def forward(self, img: torch.Tensor, tgt: torch.Tensor,
+                tgt_pad_mask: torch.Tensor):
         tgt = self.embedding(tgt)
         x = self.encoder(img)
         x = self.decoder(tgt=tgt,
                          memory=x,
-                         tgt_mask=self.tgt_mask)
+                         tgt_mask=self.tgt_mask,
+                         tgt_pad_mask=tgt_pad_mask)
         return x
 
 

@@ -1,26 +1,19 @@
-from typing import List, Tuple, Optional, Callable
-import random
-import itertools
 import io
+import itertools
+import random
+from typing import List, Tuple, Optional, Callable
 
-import miditok
-
-from ppan.types import PathLike
-from ppan.config import seq_len
-
-import numpy as np
-from rach3datautils.utils.dataset import DatasetUtils
-from rach3datautils.utils.session import Session
-from rach3datautils.utils.multimedia import MultimediaTools
-import torchvision
-import torch
-from torch.utils.data import IterableDataset
-from miditok import Structured
-from miditok.utils import get_midi_programs
-from miditoolkit import MidiFile
 import mido
+import numpy as np
+import torch
+import torchvision
+from miditok import Structured
+from miditoolkit import MidiFile
+from rach3datautils.utils.dataset import DatasetUtils
+from torch.utils.data import IterableDataset
 
-torchvision.set_video_backend("pyav")
+from ppan.config import seq_len, VID_BACKEND
+from ppan.types import PathLike
 
 
 class Rach3Dataset(IterableDataset):
@@ -43,7 +36,8 @@ class Rach3Dataset(IterableDataset):
             sample_rate = 60
         if start is None:
             start = 0
-        if end is None: end = 1
+        if end is None:
+            end = 1
 
         self.dataset = DatasetUtils(root)
         self.sessions = self.dataset.remove_noncomplete(
@@ -54,15 +48,16 @@ class Rach3Dataset(IterableDataset):
         # [midi_path, flac_path, video_path]
         self.samples: List[Tuple[PathLike, PathLike, PathLike]] = []
 
-        self.start = int(len(self.samples) * start)
-        self.end = int(len(self.samples) * end)
-
-        self.samples = self.samples[start:end]
-
         for i in self.sessions:
             [self.samples.append(j) for j in zip(i.midi.splits_list,
                                                  i.flac.splits_list,
                                                  i.video.splits_list)]
+
+        self.start = int(len(self.samples) * start)
+        self.end = int(len(self.samples) * end)
+
+        self.samples = self.samples[self.start:self.end]
+        random.shuffle(self.samples)
 
         if epoch_size is None:
             epoch_size = len(self.samples)
@@ -75,60 +70,78 @@ class Rach3Dataset(IterableDataset):
 
         special_tokens = ["BOS", "EOS", "PAD"]
         self.tokenizer = Structured(pitch_range=(range(0, 127)),
-                                    special_tokens=special_tokens)
+                                    special_tokens=special_tokens,
+                                    nb_velocities=1)
         self.vocab_len = len(self.tokenizer)
 
     def __iter__(self):
         for i in range(self.epoch_size):
-            midi_path, flac_path, video_path = random.choice(self.samples)
+            midi_path, flac_path, video_path = self.samples[i]
 
-            video = torchvision.io.VideoReader(str(video_path), "video",
-                                               num_threads=4)
+            video = torchvision.io.VideoReader(str(video_path), "video")
+
             metadata = video.get_metadata()
             video_frames = []
-            sample_ratio = int(np.ceil(metadata["video"]["fps"][0]) //
+            sample_ratio = int(np.ceil(self.get_fps(metadata)) //
                                self.sample_rate)
-            max_seek = metadata["video"]["duration"][0] - \
+            max_seek = self.get_duration(metadata) - \
                        (self.clip_len * sample_ratio /
-                        metadata["video"]["fps"][0])
-            max_seek_frame = int(max_seek * metadata["video"]["fps"][0])
+                        self.get_fps(metadata))
+            max_seek_frame = int(max_seek * self.get_fps(metadata))
             start = random.uniform(0., max_seek / 4)
-            start_frame = int(start * metadata["video"]["fps"][0])
+            prev = start
+            start_frame = int(start * self.get_fps(metadata))
+            midi_file = mido.MidiFile(midi_path)
 
             for frame_no, frame in enumerate(itertools.islice(
                     video.seek(start), max_seek_frame - start_frame)):
                 if frame_no % sample_ratio != 0:
                     continue
 
+                current_pts = start + frame_no*(1/self.get_fps(metadata))
+
                 frame_data = frame['data']
+
+                if VID_BACKEND == "cuda":
+                    frame_data = torch.swapaxes(frame_data, 0, 2)
+
                 if self.frame_transform is not None:
                     frame_data = self.frame_transform(frame_data)
 
-                current_pts = frame["pts"]
-                video_frames.append(frame_data)
+                video_frames.append(torch.swapaxes(frame_data, 1, 2))
                 if len(video_frames) == self.clip_len:
 
                     stacked_frames = torch.stack(video_frames, 0)
-
                     if self.video_transform is not None:
                         stacked_frames = self.video_transform(stacked_frames)
 
-                    midi_file = mido.MidiFile(midi_path)
                     tokens, padding_mask = self.tokenize_midi(
                         midi_file,
-                        (start, current_pts)
+                        (prev, current_pts)
                     )
                     output = {
                         'path': str(video_path),
                         'video': stacked_frames,
                         'target': tokens,
                         'padding_mask': padding_mask,
-                        'start': start,
+                        'start': prev,
                         'end': current_pts
                     }
                     yield output
                     video_frames = []
-                    start = current_pts
+                    prev = current_pts
+
+    @staticmethod
+    def get_fps(metadata):
+        if VID_BACKEND in ["cuda"]:
+            return metadata["video"]["fps"]
+        return metadata["video"]["fps"][0]
+
+    @staticmethod
+    def get_duration(metadata):
+        if VID_BACKEND in ["cuda"]:
+            return metadata["video"]["duration"]
+        return metadata["video"]["duration"][0]
 
     def tokenize_midi(self,
                       midi,
@@ -156,11 +169,13 @@ class Rach3Dataset(IterableDataset):
             if i.type == 'set_tempo':
                 tempo = i.tempo
 
-            current_time += mido.tick2second(i.time, midi.ticks_per_beat, tempo)
+            current_time += mido.tick2second(i.time,
+                                             midi.ticks_per_beat,
+                                             tempo)
 
-            if current_time > timestamps[0]:
+            if timestamps[0] <= current_time <= timestamps[1]:
                 new_track.append(i)
-            if current_time > timestamps[1]:
+            elif current_time > timestamps[1]:
                 break
 
         with io.BytesIO() as f:
@@ -176,6 +191,7 @@ class Rach3Dataset(IterableDataset):
             tokens.insert(0, self.tokenizer["BOS_None"])
 
             if len(tokens) > seq_len-1:
+                print(len(tokens))
                 tokens = tokens[:seq_len-2]
             tokens.append(self.tokenizer["EOS_None"])
 
@@ -190,6 +206,13 @@ class Rach3Dataset(IterableDataset):
                         False))
 
         return tokens, padding_mask
+
+    def tokens_to_midi(self, tokens: torch.Tensor):
+        tokens = torch.unsqueeze(tokens, dim=1)
+        midi_list = [self.tokenizer.tokens_to_midi(
+            tokens=i.cpu().detach().numpy()) for i in
+            torch.unbind(tokens, dim=0)]
+        return midi_list
 
 
 def worker_init_fn(worker_id):

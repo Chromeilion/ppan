@@ -32,6 +32,13 @@ def main():
         required=False,
         default=None
     )
+    parser_train.add_argument(
+        "-t", "--tensorboard",
+        action="store_true",
+        help="Whether to save tensorboard statistics in a ./runs dir.",
+        default=None,
+        required=False
+    )
     parser_train.set_defaults(func=train.main)
 
     parser_eval = subparsers.add_parser("eval",
