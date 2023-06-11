@@ -55,16 +55,16 @@ def main(dataset_dir: PathLike,
     num_workers = 1
     clip_len = 16
     sample_rate = 30
-    max_samples_in_eval = 10
+    max_samples_in_eval = 20
 
     """Optimizer Config"""
     lr = 0.01
 
     """Model Config"""
-    n_layers = 12
+    n_decoder_layers = 8
 
     """Tensorboard Config"""
-    rec_rate = 80  # Only record a value every x batches
+    eval_every = 80
     writer = None
     if tensorboard:
         writer = SummaryWriter()
@@ -76,8 +76,7 @@ def main(dataset_dir: PathLike,
         video_transform=MViT_V2_S_Weights.KINETICS400_V1.transforms(),
         clip_len=clip_len,
         sample_rate=sample_rate,
-        seq_len=seq_len,
-        epoch_size=1
+        seq_len=seq_len
     )
     test = Rach3Dataset(
         samples=test,
@@ -92,8 +91,8 @@ def main(dataset_dir: PathLike,
     model = PPAnModel(encoder_weights=weights,
                       n_tokens=vocab_size,
                       seq_len=seq_len,
-                      emb_dim=393,
-                      n_layers=n_layers)
+                      emb_dim=768,
+                      n_decoder_layers=n_decoder_layers)
     model.to(device)
 
     if num_workers > 1:
@@ -142,7 +141,7 @@ def main(dataset_dir: PathLike,
             loss.backward()
             optimizer.step()
 
-            if global_step % rec_rate == 0:
+            if global_step % eval_every == 0:
                 # Evaluation, saving results, etc.
                 model.eval()
                 with torch.no_grad():
@@ -184,7 +183,7 @@ def main(dataset_dir: PathLike,
                                           scalar_value=avg_test_loss,
                                           global_step=global_step)
 
-                        if global_step % (4*rec_rate) == 0:
+                        if global_step % (2*eval_every) == 0:
                             video = batch["video"].cpu().detach()
                             video = torch.swapaxes(video, 1, 2)
                             writer.add_video(

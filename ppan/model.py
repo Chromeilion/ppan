@@ -42,10 +42,11 @@ class Encoder(nn.Module):
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.mvit = mvit_v2_s(weights=mvit_weights)
-        self.linear = nn.Linear(in_features=768, out_features=seq_len)
+        self.linear = nn.Linear(in_features=393, out_features=seq_len)
 
     def forward(self, x: torch.Tensor):
         x = self.mvit(x)
+        x = torch.swapaxes(x, 1, 2)
         x = self.linear(x)
         x = torch.swapaxes(x, 1, 2)
         return x
@@ -78,7 +79,13 @@ class Decoder(nn.Module):
         self.positional_encoding = PositionalEmbedding(d_model=d_model,
                                                        max_len=seq_len)
 
+        self.embedding = nn.Embedding(
+            num_embeddings=n_tokens,
+            embedding_dim=emb_dim
+        )
+
     def forward(self, tgt, memory, tgt_mask, tgt_pad_mask):
+        tgt = self.embedding(tgt)
         tgt = self.positional_encoding(tgt)
         x = self.decoder(tgt=tgt,
                          memory=memory,
@@ -92,10 +99,10 @@ class PPAnModel(nn.Module):
     def __init__(self,
                  n_tokens: int,
                  emb_dim: int,
-                 nhead: int = 1,
-                 seq_len: int = 15,
+                 nhead: int = 2,
+                 seq_len: int = 110,
                  encoder_weights: Optional[MViT_V2_S_Weights] = None,
-                 n_layers: int = 5,
+                 n_decoder_layers: int = 5,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.encoder = Encoder(
@@ -104,21 +111,19 @@ class PPAnModel(nn.Module):
         )
         self.decoder = Decoder(
             d_model=emb_dim,
-            n_layers=n_layers,
+            n_layers=n_decoder_layers,
             nhead=nhead,
             emb_dim=emb_dim,
             n_tokens=n_tokens,
             seq_len=seq_len
         )
-        self.tgt_mask = get_tgt_mask(seq_len=seq_len).to(device)
-        self.embedding = nn.Embedding(
-            num_embeddings=n_tokens,
-            embedding_dim=emb_dim
+        self.register_buffer(
+            "tgt_mask",
+            get_tgt_mask(seq_len=seq_len)
         )
 
     def forward(self, img: torch.Tensor, tgt: torch.Tensor,
                 tgt_pad_mask: torch.Tensor):
-        tgt = self.embedding(tgt)
         x = self.encoder(img)
         x = self.decoder(tgt=tgt,
                          memory=x,
