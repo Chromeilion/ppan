@@ -235,3 +235,6 @@ src/
 
 # Tensorboard dir
 runs/
+
+# Model checkpoint files
+checkpoints/

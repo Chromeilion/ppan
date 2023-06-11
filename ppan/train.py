@@ -1,4 +1,5 @@
 from typing import Optional
+import os
 
 import torch
 from torch.utils.data import DataLoader
@@ -7,21 +8,41 @@ from torchvision.models.video.mvit import MViT_V2_S_Weights
 from tqdm import tqdm
 
 from ppan.config import device, seq_len
-from ppan.dataset import Rach3Dataset, VID_BACKEND, worker_init_fn
+from ppan.dataset import Rach3Dataset, VID_BACKEND, worker_init_fn, \
+    load_data, split_data
+from ppan.midi import compute_piano_img
 from ppan.model import PPAnModel
 from ppan.types import PathLike
-from ppan.midi import compute_piano_img
 
 
 def main(dataset_dir: PathLike,
          output: Optional[PathLike] = None,
          tensorboard: Optional[bool] = None,
          saved_model: Optional[str] = None,
-         **kwargs):
+         *args, **kwargs):
+    """
+    Training function for PPAn.
+
+    Parameters
+    ----------
+    dataset_dir : PathLike
+    output : Optional[PathLike]
+        Where to output best model file
+    tensorboard : bool
+        Whether to save statistics to Tensorboard
+    saved_model : PathLike
+        Location of an already trained model to continue training from
+
+    Returns
+    -------
+    None
+    """
     if tensorboard is None:
         tensorboard = False
     if output is None:
-        output = "./best_model.tar"
+        if not os.path.exists("./checkpoints"):
+            os.mkdir("./checkpoints")
+        output = "./checkpoints/best_model.tar"
     if VID_BACKEND == "cuda":
         # CUDA does not support the default fork method
         torch.multiprocessing.set_start_method("spawn")
@@ -34,6 +55,7 @@ def main(dataset_dir: PathLike,
     num_workers = 1
     clip_len = 16
     sample_rate = 30
+    max_samples_in_eval = 10
 
     """Optimizer Config"""
     lr = 0.01
@@ -41,27 +63,35 @@ def main(dataset_dir: PathLike,
     """Model Config"""
     n_layers = 12
 
-    # Tensorboard setup
-    rec_rate, writer = None, None
+    """Tensorboard Config"""
+    rec_rate = 80  # Only record a value every x batches
+    writer = None
     if tensorboard:
-        rec_rate = 5  # Only record a value every x batches
         writer = SummaryWriter()
 
-    dataset = Rach3Dataset(
-        root=dataset_dir,
+    dataset = load_data(dataset_dir)
+    train, test = split_data(dataset, 0.2)
+    train = Rach3Dataset(
+        samples=train,
         video_transform=MViT_V2_S_Weights.KINETICS400_V1.transforms(),
         clip_len=clip_len,
-        sample_rate=sample_rate
+        sample_rate=sample_rate,
+        seq_len=seq_len,
+        epoch_size=1
+    )
+    test = Rach3Dataset(
+        samples=test,
+        video_transform=MViT_V2_S_Weights.KINETICS400_V1.transforms(),
+        clip_len=clip_len,
+        sample_rate=sample_rate,
+        seq_len=seq_len
     )
     weights = MViT_V2_S_Weights.KINETICS400_V1
-
-    tgt_mask = torch.triu(torch.ones((seq_len, seq_len), dtype=torch.bool),
-                          diagonal=1).to(device)
+    vocab_size = train.vocab_len
 
     model = PPAnModel(encoder_weights=weights,
-                      n_tokens=dataset.vocab_len,
+                      n_tokens=vocab_size,
                       seq_len=seq_len,
-                      tgt_mask=tgt_mask,
                       emb_dim=393,
                       n_layers=n_layers)
     model.to(device)
@@ -71,8 +101,15 @@ def main(dataset_dir: PathLike,
     else:
         worker_init_func = None
 
-    loader = DataLoader(
-        dataset,
+    train_loader = DataLoader(
+        train,
+        batch_size=batch_size,
+        prefetch_factor=prefetch_factor,
+        num_workers=num_workers,
+        worker_init_fn=worker_init_func
+    )
+    test_loader = DataLoader(
+        test,
         batch_size=batch_size,
         prefetch_factor=prefetch_factor,
         num_workers=num_workers,
@@ -92,7 +129,8 @@ def main(dataset_dir: PathLike,
 
     model.train()
     for epoch in tqdm(range(epochs), position=0):
-        for batch in tqdm(loader, position=1):
+        for batch in tqdm(train_loader, position=1):
+            # Basic training loop
             images = batch["video"].to(device)
             target = batch["target"].to(device)
             padding_mask = batch["padding_mask"].to(device)
@@ -104,46 +142,76 @@ def main(dataset_dir: PathLike,
             loss.backward()
             optimizer.step()
 
-            with torch.no_grad():  # Taking no chances regarding gradients
-                if tensorboard:
-                    if global_step % rec_rate == 0:
-                        writer.add_scalar(tag="loss/train",
-                                          scalar_value=loss.item(),
-                                          global_step=global_step)
-                    if global_step % (4*rec_rate) == 0:
-                        video = batch["video"].cpu().detach()
-                        video = torch.swapaxes(video, 1, 2)
-                        writer.add_video(
-                            tag="batch/train/video",
-                            vid_tensor=video,
-                            global_step=global_step
-                        )
-                        target_midi = dataset.tokens_to_midi(target)
-                        pred_midi = dataset.tokens_to_midi(
-                            torch.argmax(pred, dim=1)
-                        )
-                        target_img = compute_piano_img(target_midi)
-                        pred_img = compute_piano_img(pred_midi)
-                        midline = torch.ones(size=(batch_size, 1, 3,
-                                                   pred_img.shape[3]))
-                        comp_img = torch.cat([target_img, midline,  pred_img],
-                                             2)
+            if global_step % rec_rate == 0:
+                # Evaluation, saving results, etc.
+                model.eval()
+                with torch.no_grad():
+                    # Short evaluation on test set
+                    avg_test_loss = 0
+                    for s_num, test_batch in enumerate(test_loader):
+                        images_t = test_batch["video"].to(device)
+                        target_t = test_batch["target"].to(device)
+                        padding_mask_t = batch["padding_mask"].to(device)
 
-                        writer.add_images(tag="batch/train/target-pred",
-                                          img_tensor=comp_img,
-                                          global_step=global_step)
+                        pred_t = model(img=images_t, tgt=target_t,
+                                       tgt_pad_mask=padding_mask_t)
+                        pred_t = torch.swapaxes(pred_t, 1, 2)
+                        loss_test = loss_fn(pred_t, target_t)
+                        avg_test_loss = (avg_test_loss * s_num +
+                                         loss_test.item()) / (s_num + 1)
 
-                    if loss.item() < best_loss:
-                        best_loss = loss.item()
+                        if s_num >= max_samples_in_eval:
+                            break
+
+                    # Save model if the loss improved on test set
+                    if avg_test_loss < best_loss:
+                        best_loss = avg_test_loss
                         torch.save({
                             'epoch': epoch,
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
-                            'loss': loss,
+                            'loss': loss_test,
                             'step': global_step
                             }, output
                         )
-                    global_step += 1
+
+                    if tensorboard:
+
+                        writer.add_scalar(tag="loss/train",
+                                          scalar_value=loss.item(),
+                                          global_step=global_step)
+                        writer.add_scalar(tag="loss/test",
+                                          scalar_value=avg_test_loss,
+                                          global_step=global_step)
+
+                        if global_step % (4*rec_rate) == 0:
+                            video = batch["video"].cpu().detach()
+                            video = torch.swapaxes(video, 1, 2)
+                            writer.add_video(
+                                tag="batch/train/video",
+                                vid_tensor=video,
+                                global_step=global_step
+                            )
+                            target_midi = train.tokenizer.tokens_to_midi(
+                                target_t
+                            )
+                            pred_midi = train.tokenizer.tokens_to_midi(
+                                torch.argmax(pred_t, dim=1)
+                            )
+                            target_img = compute_piano_img(target_midi)
+                            pred_img = compute_piano_img(pred_midi)
+                            midline = torch.ones(size=(batch_size, 1, 3,
+                                                       pred_img.shape[3]))
+                            comp_img = torch.cat([target_img, midline,
+                                                  pred_img],
+                                                 2)
+
+                            writer.add_images(tag="batch/test/target-pred",
+                                              img_tensor=comp_img,
+                                              global_step=global_step)
+                model.train()
+            del batch, images, target, padding_mask
+            global_step += 1
 
     if tensorboard:
         writer.add_hparams({'lr': lr, 'bsize': batch_size,

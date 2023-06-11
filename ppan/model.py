@@ -1,3 +1,4 @@
+import math
 from typing import Optional, Dict, List, Any
 
 import torch
@@ -5,6 +6,8 @@ from torch import nn
 from torchvision.models.video import MViT_V2_S_Weights, MViT
 from torchvision.models.video.mvit import _unsqueeze, _ovewrite_named_param, \
     MSBlockConfig, WeightsEnum
+
+from ppan.config import device
 
 
 class PPAnMViT(MViT):
@@ -54,7 +57,7 @@ class Decoder(nn.Module):
     predictions.
     """
     def __init__(self, d_model: int, nhead: int, n_layers: int,
-                 n_tokens: int, emb_dim: int, *args, **kwargs):
+                 n_tokens: int, emb_dim: int, seq_len: int, *args, **kwargs):
         super().__init__(*args, **kwargs)
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
@@ -70,11 +73,13 @@ class Decoder(nn.Module):
             nn.Linear(
                 in_features=emb_dim,
                 out_features=n_tokens
-            ),
-            nn.Softmax(dim=1)
+            )
         )
+        self.positional_encoding = PositionalEmbedding(d_model=d_model,
+                                                       max_len=seq_len)
 
     def forward(self, tgt, memory, tgt_mask, tgt_pad_mask):
+        tgt = self.positional_encoding(tgt)
         x = self.decoder(tgt=tgt,
                          memory=memory,
                          tgt_mask=tgt_mask,
@@ -86,7 +91,6 @@ class Decoder(nn.Module):
 class PPAnModel(nn.Module):
     def __init__(self,
                  n_tokens: int,
-                 tgt_mask: torch.Tensor,
                  emb_dim: int,
                  nhead: int = 1,
                  seq_len: int = 15,
@@ -103,9 +107,10 @@ class PPAnModel(nn.Module):
             n_layers=n_layers,
             nhead=nhead,
             emb_dim=emb_dim,
-            n_tokens=n_tokens
+            n_tokens=n_tokens,
+            seq_len=seq_len
         )
-        self.tgt_mask = tgt_mask
+        self.tgt_mask = get_tgt_mask(seq_len=seq_len).to(device)
         self.embedding = nn.Embedding(
             num_embeddings=n_tokens,
             embedding_dim=emb_dim
@@ -120,6 +125,24 @@ class PPAnModel(nn.Module):
                          tgt_mask=self.tgt_mask,
                          tgt_pad_mask=tgt_pad_mask)
         return x
+
+
+class PositionalEmbedding(nn.Module):
+    """
+    A very simple trainable positional embedding.
+    """
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEmbedding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.pe = nn.Parameter(torch.Tensor(max_len, d_model))
+        self.param_init()
+
+    def param_init(self):
+        nn.init.xavier_normal_(self.pe)
+
+    def forward(self, x):
+        x = x + self.pe
+        return self.dropout(x)
 
 
 def _mvit_ppan(
@@ -293,3 +316,12 @@ def mvit_v2_s(*, weights: Optional[MViT_V2_S_Weights] = None,
         progress=progress,
         **kwargs,
     )
+
+
+def get_tgt_mask(seq_len):
+    """
+    Build a diagonal mask with the aim to stop transformer from cheating by
+    looking ahead in the given tgt tensor.
+    """
+    return torch.triu(torch.ones((seq_len, seq_len), dtype=torch.bool),
+                      diagonal=1)

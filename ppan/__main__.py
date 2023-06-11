@@ -16,7 +16,7 @@ def main():
                                          help="Train the network on some "
                                               "data.")
     parser_train.add_argument(
-        "-d", "--dataset_dir",
+        "-d", "--dataset-dir",
         nargs=1,
         action="store",
         type=str,
@@ -39,13 +39,20 @@ def main():
         default=None,
         required=False
     )
+    parser_train.add_argument(
+        "-m", "--saved-model",
+        action="store",
+        help="Path to a model checkpoint file for continuing training.",
+        default=None,
+        required=False
+    )
     parser_train.set_defaults(func=train.main)
 
     parser_eval = subparsers.add_parser("eval",
                                         help="Evaluate the model on a "
                                              "testset.")
     parser_eval.add_argument(
-        "-d", "--dataset_dir",
+        "-d", "--dataset-dir",
         nargs=1,
         action="store",
         type=str,
@@ -53,7 +60,7 @@ def main():
         required=True
     )
     parser_eval.add_argument(
-        "-m", "--model_dir",
+        "-m", "--model-dir",
         nargs=1,
         action="store",
         type=str,
