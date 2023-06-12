@@ -175,46 +175,53 @@ def main(dataset_dir: PathLike,
                         )
 
                     if tensorboard:
+                        write_tensorboard_stats(
+                            batch, writer, loss, global_step, avg_test_loss,
+                            test, target_t, pred_t, batch_size
+                        )
 
-                        writer.add_scalar(tag="loss/train",
-                                          scalar_value=loss.item(),
-                                          global_step=global_step)
-                        writer.add_scalar(tag="loss/test",
-                                          scalar_value=avg_test_loss,
-                                          global_step=global_step)
-
-                        if global_step % (2*eval_every) == 0:
-                            video = batch["video"].cpu().detach()
-                            video = torch.swapaxes(video, 1, 2)
-                            writer.add_video(
-                                tag="batch/train/video",
-                                vid_tensor=video,
-                                global_step=global_step
-                            )
-                            target_midi = train.tokenizer.tokens_to_midi(
-                                target_t
-                            )
-                            pred_midi = train.tokenizer.tokens_to_midi(
-                                torch.argmax(pred_t, dim=1)
-                            )
-                            target_img = compute_piano_img(target_midi)
-                            pred_img = compute_piano_img(pred_midi)
-                            midline = torch.ones(size=(batch_size, 1, 3,
-                                                       pred_img.shape[3]))
-                            comp_img = torch.cat([target_img, midline,
-                                                  pred_img],
-                                                 2)
-
-                            writer.add_images(tag="batch/test/target-pred",
-                                              img_tensor=comp_img,
-                                              global_step=global_step)
                 model.train()
-            del batch, images, target, padding_mask
             global_step += 1
 
     if tensorboard:
+        # Add final results for hyperparamater comparison
         writer.add_hparams({'lr': lr, 'bsize': batch_size,
                             'clen': clip_len, 'srate': sample_rate},
                            {'hparam/loss': best_loss})
         # Make sure all events have been written to disk
         writer.flush()
+
+
+def write_tensorboard_stats(batch, writer, loss, global_step, avg_test_loss,
+                            dataset, target_t, pred_t, batch_size):
+    writer.add_scalar(tag="loss/train",
+                      scalar_value=loss.item(),
+                      global_step=global_step)
+    writer.add_scalar(tag="loss/test",
+                      scalar_value=avg_test_loss,
+                      global_step=global_step)
+
+    video = batch["video"].cpu().detach()
+    video = torch.swapaxes(video, 1, 2)
+    writer.add_video(
+        tag="batch/train/video",
+        vid_tensor=video,
+        global_step=global_step
+    )
+    target_midi = dataset.tokenizer.tokens_to_midi(
+        target_t
+    )
+    pred_midi = dataset.tokenizer.tokens_to_midi(
+        torch.argmax(pred_t, dim=1)
+    )
+    target_img = compute_piano_img(target_midi)
+    pred_img = compute_piano_img(pred_midi)
+    midline = torch.ones(size=(batch_size, 1, 3,
+                               pred_img.shape[3]))
+    comp_img = torch.cat([target_img, midline,
+                          pred_img],
+                         2)
+
+    writer.add_images(tag="batch/test/target-pred",
+                      img_tensor=comp_img,
+                      global_step=global_step)
