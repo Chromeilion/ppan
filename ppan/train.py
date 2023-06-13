@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from ppan.config import device, seq_len
 from ppan.dataset import Rach3Dataset, VID_BACKEND, worker_init_fn, \
-    load_data, split_data
+    load_data, split_data, DatasetOutput
 from ppan.midi import compute_piano_img
 from ppan.model import PPAnModel
 from ppan.types import PathLike
@@ -49,22 +49,23 @@ def main(dataset_dir: PathLike,
 
     # TODO: Dont hardcode hyperparamaters
     """Dataset Config"""
-    batch_size = 3
-    epochs = 20
-    prefetch_factor = 1
-    num_workers = 1
+    batch_size = 4
+    epochs = 5
+    prefetch_factor = None
+    num_workers = 0
     clip_len = 16
     sample_rate = 30
-    max_samples_in_eval = 20
+    max_samples_in_eval = 10
+    clips_per_vid = 100
 
     """Optimizer Config"""
     lr = 0.01
 
     """Model Config"""
-    n_decoder_layers = 8
+    n_decoder_layers = 6
 
     """Tensorboard Config"""
-    eval_every = 80
+    eval_every = 40
     writer = None
     if tensorboard:
         writer = SummaryWriter()
@@ -76,14 +77,17 @@ def main(dataset_dir: PathLike,
         video_transform=MViT_V2_S_Weights.KINETICS400_V1.transforms(),
         clip_len=clip_len,
         sample_rate=sample_rate,
-        seq_len=seq_len
+        seq_len=seq_len,
+        clips_per_vid=clips_per_vid
     )
     test = Rach3Dataset(
         samples=test,
         video_transform=MViT_V2_S_Weights.KINETICS400_V1.transforms(),
         clip_len=clip_len,
         sample_rate=sample_rate,
-        seq_len=seq_len
+        seq_len=seq_len,
+        clips_per_vid=clips_per_vid,
+        shuffle_every_loop=True
     )
     weights = MViT_V2_S_Weights.KINETICS400_V1
     vocab_size = train.vocab_len
@@ -92,7 +96,10 @@ def main(dataset_dir: PathLike,
                       n_tokens=vocab_size,
                       seq_len=seq_len,
                       emb_dim=768,
-                      n_decoder_layers=n_decoder_layers)
+                      n_decoder_layers=n_decoder_layers,
+                      bos_token=train.tokenizer.bos,
+                      eos_token=train.tokenizer.eos,
+                      pad_token=train.tokenizer.pad)
     model.to(device)
 
     if num_workers > 1:
@@ -114,10 +121,11 @@ def main(dataset_dir: PathLike,
         num_workers=num_workers,
         worker_init_fn=worker_init_func
     )
-    loss_fn = torch.nn.CrossEntropyLoss()
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=train.tokenizer.pad)
     optimizer = torch.optim.SGD(params=model.parameters(), lr=lr)
     best_loss = torch.inf
     global_step = 0
+    test_step = 0
 
     if saved_model is not None:
         checkpoint = torch.load(saved_model)
@@ -126,20 +134,26 @@ def main(dataset_dir: PathLike,
         best_loss = checkpoint['loss']
         global_step = checkpoint['step']
 
+    total_correct = 0
+    total_correct_t = 0
+
     model.train()
     for epoch in tqdm(range(epochs), position=0):
-        for batch in tqdm(train_loader, position=1):
+        for batch in tqdm(train_loader, position=1, total=len(train_loader)):
+            batch: DatasetOutput
             # Basic training loop
-            images = batch["video"].to(device)
-            target = batch["target"].to(device)
-            padding_mask = batch["padding_mask"].to(device)
-
-            pred = model(img=images, tgt=target, tgt_pad_mask=padding_mask)
-            pred = torch.swapaxes(pred, 1, 2)
-            loss = loss_fn(pred, target)
+            pred, loss, target = run_through_model(
+                batch=batch,
+                model=model,
+                loss_fn=loss_fn
+            )
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            preds_max = torch.argmax(pred, dim=1)
+            if torch.equal(preds_max, target):
+                total_correct += 1
 
             if global_step % eval_every == 0:
                 # Evaluation, saving results, etc.
@@ -148,17 +162,16 @@ def main(dataset_dir: PathLike,
                     # Short evaluation on test set
                     avg_test_loss = 0
                     for s_num, test_batch in enumerate(test_loader):
-                        images_t = test_batch["video"].to(device)
-                        target_t = test_batch["target"].to(device)
-                        padding_mask_t = batch["padding_mask"].to(device)
-
-                        pred_t = model(img=images_t, tgt=target_t,
-                                       tgt_pad_mask=padding_mask_t)
-                        pred_t = torch.swapaxes(pred_t, 1, 2)
-                        loss_test = loss_fn(pred_t, target_t)
+                        pred_test, loss_test, target_test = run_through_model(
+                            test_batch, model, loss_fn
+                        )
                         avg_test_loss = (avg_test_loss * s_num +
                                          loss_test.item()) / (s_num + 1)
 
+                        pred_t_max = torch.argmax(pred_test, dim=1)
+                        if torch.equal(pred_t_max, target_test):
+                            total_correct_t += 1
+                        test_step += 1
                         if s_num >= max_samples_in_eval:
                             break
 
@@ -175,9 +188,12 @@ def main(dataset_dir: PathLike,
                         )
 
                     if tensorboard:
+                        train_acc = total_correct / (global_step + 1)
+                        test_acc = total_correct_t / (test_step + 1)
                         write_tensorboard_stats(
                             batch, writer, loss, global_step, avg_test_loss,
-                            test, target_t, pred_t, batch_size
+                            test, target_test, pred_test, train_acc,
+                            test_acc, target, pred
                         )
 
                 model.train()
@@ -186,19 +202,41 @@ def main(dataset_dir: PathLike,
     if tensorboard:
         # Add final results for hyperparamater comparison
         writer.add_hparams({'lr': lr, 'bsize': batch_size,
-                            'clen': clip_len, 'srate': sample_rate},
+                            'clen': clip_len, 'srate': sample_rate,
+                            'cpervid': clips_per_vid},
                            {'hparam/loss': best_loss})
         # Make sure all events have been written to disk
         writer.flush()
 
 
+def run_through_model(batch: DatasetOutput, model, loss_fn):
+    images = batch["video"].to(device)
+    tgt_in = batch["tgt_in"].to(device)
+    target = batch["target"].to(device)
+    padding_mask_test = batch["padding_mask"].to(device)
+
+    pred = model(img=images, tgt=tgt_in,
+                 tgt_pad_mask=padding_mask_test)
+    pred = torch.swapaxes(pred, 1, 2)
+    loss = loss_fn(pred, target)
+
+    return pred, loss, target
+
+
 def write_tensorboard_stats(batch, writer, loss, global_step, avg_test_loss,
-                            dataset, target_t, pred_t, batch_size):
+                            dataset, target_test, pred_test, train_acc,
+                            test_acc, target, pred):
     writer.add_scalar(tag="loss/train",
                       scalar_value=loss.item(),
                       global_step=global_step)
     writer.add_scalar(tag="loss/test",
                       scalar_value=avg_test_loss,
+                      global_step=global_step)
+    writer.add_scalar(tag="accuracy/train",
+                      scalar_value=train_acc,
+                      global_step=global_step)
+    writer.add_scalar(tag="accuracy/test",
+                      scalar_value=test_acc,
                       global_step=global_step)
 
     video = batch["video"].cpu().detach()
@@ -208,20 +246,30 @@ def write_tensorboard_stats(batch, writer, loss, global_step, avg_test_loss,
         vid_tensor=video,
         global_step=global_step
     )
+    comp_img_test = pred_image_workflow(target=target_test, pred=pred_test,
+                                        dataset=dataset)
+    comp_img_train = pred_image_workflow(target=target, pred=pred,
+                                         dataset=dataset)
+    writer.add_images(tag="batch/test/target-pred",
+                      img_tensor=comp_img_test,
+                      global_step=global_step)
+    writer.add_images(tag="batch/train/target-pred",
+                      img_tensor=comp_img_train,
+                      global_step=global_step)
+
+
+def pred_image_workflow(target, pred, dataset):
     target_midi = dataset.tokenizer.tokens_to_midi(
-        target_t
+        target
     )
     pred_midi = dataset.tokenizer.tokens_to_midi(
-        torch.argmax(pred_t, dim=1)
+        torch.argmax(pred, dim=1)
     )
     target_img = compute_piano_img(target_midi)
     pred_img = compute_piano_img(pred_midi)
-    midline = torch.ones(size=(batch_size, 1, 3,
+    midline = torch.ones(size=(target_img.shape[0], 1, 3,
                                pred_img.shape[3]))
     comp_img = torch.cat([target_img, midline,
                           pred_img],
                          2)
-
-    writer.add_images(tag="batch/test/target-pred",
-                      img_tensor=comp_img,
-                      global_step=global_step)
+    return comp_img

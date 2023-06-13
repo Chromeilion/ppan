@@ -1,6 +1,6 @@
 import itertools
 import random
-from typing import List, Tuple, Optional, Callable
+from typing import List, Tuple, Optional, Callable, TypedDict
 
 import mido
 import numpy as np
@@ -12,6 +12,16 @@ from torch.utils.data import IterableDataset
 from ppan.config import VID_BACKEND
 from ppan.midi import PPAnMidi
 from ppan.types import PathLike
+
+
+class DatasetOutput(TypedDict):
+    path: str
+    video: torch.Tensor
+    tgt_in: torch.Tensor
+    target: torch.Tensor
+    padding_mask: torch.Tensor
+    start: float
+    end: float
 
 
 class Rach3Dataset(IterableDataset):
@@ -26,12 +36,18 @@ class Rach3Dataset(IterableDataset):
                  frame_transform: Optional[Callable] = None,
                  video_transform: Optional[Callable] = None,
                  clip_len: Optional[int] = None,
+                 clips_per_vid: Optional[int] = None,
                  sample_rate: Optional[int] = None,
                  start: Optional[float] = None,
-                 end: Optional[float] = None):
+                 end: Optional[float] = None,
+                 shuffle_every_loop: Optional[bool] = None):
         """
         Parameters
         ----------
+        shuffle_every_loop : bool
+            Whether to shuffle the samples every time the generator is called
+        clips_per_vid : int
+            Maximum number of clips to be loaded per video. Defaults to 100
         samples : List[Tuple[PathLike, PathLike, PathLike]]
             [midi_path, flac_path, video_path]
         seq_len : int
@@ -60,7 +76,12 @@ class Rach3Dataset(IterableDataset):
             start = 0
         if end is None:
             end = 1
+        if clips_per_vid is None:
+            clips_per_vid = 100
+        if shuffle_every_loop is None:
+            shuffle_every_loop = False
 
+        self.shuffle = shuffle_every_loop
         self.samples = samples
 
         self.start = int(len(self.samples) * start)
@@ -68,6 +89,7 @@ class Rach3Dataset(IterableDataset):
 
         self.samples = self.samples[self.start:self.end]
         random.shuffle(self.samples)
+        self.clips_per = clips_per_vid
 
         if epoch_size is None:
             epoch_size = len(self.samples)
@@ -81,7 +103,10 @@ class Rach3Dataset(IterableDataset):
         self.tokenizer = PPAnMidi(seq_len)
         self.vocab_len = self.tokenizer.vocab_len
 
-    def __iter__(self):
+    def __iter__(self) -> DatasetOutput:
+        if self.shuffle:
+            random.shuffle(self.samples)
+
         for i in range(self.epoch_size):
             midi_path, flac_path, video_path = self.samples[i]
 
@@ -98,7 +123,7 @@ class Rach3Dataset(IterableDataset):
             prev = start
             start_frame = int(start * self.get_fps(metadata))
             midi_file = mido.MidiFile(midi_path)
-
+            clip_no = 0
             for frame_no, frame in enumerate(itertools.islice(
                     video.seek(start), max_seek_frame - start_frame)):
                 if frame_no % sample_ratio != 0:
@@ -121,14 +146,15 @@ class Rach3Dataset(IterableDataset):
                     if self.video_transform is not None:
                         stacked_frames = self.video_transform(stacked_frames)
 
-                    tokens, padding_mask = self.tokenizer(
+                    bos_tokens, eos_tokens, padding_mask = self.tokenizer(
                         midi_file,
                         (prev, current_pts)
                     )
                     output = {
                         'path': str(video_path),
                         'video': stacked_frames,
-                        'target': tokens,
+                        'tgt_in': bos_tokens,
+                        'target': eos_tokens,
                         'padding_mask': padding_mask,
                         'start': prev,
                         'end': current_pts
@@ -136,6 +162,13 @@ class Rach3Dataset(IterableDataset):
                     yield output
                     video_frames = []
                     prev = current_pts
+                    clip_no += 1
+
+                if clip_no >= self.clips_per:
+                    break
+
+    def __len__(self):
+        return len(self.samples) * self.clips_per
 
     @staticmethod
     def get_fps(metadata):

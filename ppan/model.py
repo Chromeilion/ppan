@@ -16,6 +16,7 @@ class PPAnMViT(MViT):
     found here:
     https://github.com/pytorch/vision/blob/main/torchvision/models/video/mvit.py
     """
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Convert if necessary (B, C, H, W) -> (B, C, 1, H, W)
         x = _unsqueeze(x, 5, 2)[0]
@@ -84,7 +85,9 @@ class Decoder(nn.Module):
             embedding_dim=emb_dim
         )
 
-    def forward(self, tgt, memory, tgt_mask, tgt_pad_mask):
+    def forward(self, tgt, memory,
+                tgt_mask: Optional = None,
+                tgt_pad_mask: Optional = None):
         tgt = self.embedding(tgt)
         tgt = self.positional_encoding(tgt)
         x = self.decoder(tgt=tgt,
@@ -99,12 +102,23 @@ class PPAnModel(nn.Module):
     def __init__(self,
                  n_tokens: int,
                  emb_dim: int,
+                 bos_token: int,
+                 eos_token: int,
+                 pad_token: int,
                  nhead: int = 2,
                  seq_len: int = 110,
                  encoder_weights: Optional[MViT_V2_S_Weights] = None,
-                 n_decoder_layers: int = 5,
+                 n_decoder_layers: Optional[int] = None,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if n_decoder_layers is None:
+            n_decoder_layers = 5
+        self.seq_len: int = seq_len
+        self.bos = bos_token
+        self.eos = eos_token
+        self.pad = pad_token
+        self.n_tokens = n_tokens
+
         self.encoder = Encoder(
             seq_len=seq_len,
             mvit_weights=encoder_weights
@@ -123,12 +137,58 @@ class PPAnModel(nn.Module):
         )
 
     def forward(self, img: torch.Tensor, tgt: torch.Tensor,
-                tgt_pad_mask: torch.Tensor):
+                tgt_pad_mask: torch.Tensor) -> torch.Tensor:
         x = self.encoder(img)
-        x = self.decoder(tgt=tgt,
-                         memory=x,
-                         tgt_mask=self.tgt_mask,
-                         tgt_pad_mask=tgt_pad_mask)
+        if self.training:
+            x = self.decoder(tgt=tgt,
+                             memory=x,
+                             tgt_mask=self.tgt_mask,
+                             tgt_pad_mask=tgt_pad_mask)
+        else:
+            x = self.evaluate(memory=x)
+        return x
+
+    def evaluate(self,
+                 memory: torch.Tensor) -> torch.Tensor:
+        """
+        Greedy iterative decoding for when the model is in eval mode.
+
+        Parameters
+        ----------
+        memory : torch.Tensor
+            output of the encoder
+
+        Returns
+        -------
+        preds : torch.Tensor
+        """
+        tgt = torch.fill(torch.zeros(size=(memory.shape[0],
+                                           self.seq_len), dtype=torch.long),
+                         self.pad).to(device)
+        tgt[:, 0] = self.bos
+        tgt_pad_mask = torch.ones(size=(memory.shape[0], self.seq_len),
+                                  dtype=torch.bool).to(device)
+        x = torch.zeros(size=(memory.shape[0], memory.shape[1],
+                              self.n_tokens)).to(device)
+        x[:, :, self.pad] = 1
+        done = [False for _ in range(tgt.shape[0])]
+        for i in range(self.seq_len - 1):
+            tgt_pad_mask[:, i] = False
+            out = self.decoder(
+                memory=memory,
+                tgt=tgt,
+                tgt_mask=self.tgt_mask,
+                tgt_pad_mask=tgt_pad_mask
+            )
+            tgt[:, i+1] = torch.argmax(out, dim=2)[:, i]
+            for j in range(tgt.shape[0]):
+                if self.eos not in tgt[j, :]:
+                    x[j, i, :] = out[j, i, :]
+                elif self.eos in tgt[j, :] and not done[j]:
+                    x[j, i, :] = out[j, i, :]
+                    done[j] = True
+            if all(done):
+                break
         return x
 
 
@@ -136,6 +196,7 @@ class PositionalEmbedding(nn.Module):
     """
     A very simple trainable positional embedding.
     """
+
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEmbedding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
@@ -162,10 +223,12 @@ def _mvit_ppan(
     https://github.com/pytorch/vision/blob/main/torchvision/models/video/mvit.py
     """
     if weights is not None:
-        _ovewrite_named_param(kwargs, "num_classes", len(weights.meta["categories"]))
+        _ovewrite_named_param(kwargs, "num_classes",
+                              len(weights.meta["categories"]))
         assert weights.meta["min_size"][0] == weights.meta["min_size"][1]
         _ovewrite_named_param(kwargs, "spatial_size", weights.meta["min_size"])
-        _ovewrite_named_param(kwargs, "temporal_size", weights.meta["min_temporal_size"])
+        _ovewrite_named_param(kwargs, "temporal_size",
+                              weights.meta["min_temporal_size"])
     spatial_size = kwargs.pop("spatial_size", (224, 224))
     temporal_size = kwargs.pop("temporal_size", 16)
 
@@ -218,8 +281,10 @@ def mvit_v2_s(*, weights: Optional[MViT_V2_S_Weights] = None,
 
     config: Dict[str, List] = {
         "num_heads": [1, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 8, 8],
-        "input_channels": [96, 96, 192, 192, 384, 384, 384, 384, 384, 384, 384, 384, 384, 384, 384, 768],
-        "output_channels": [96, 192, 192, 384, 384, 384, 384, 384, 384, 384, 384, 384, 384, 384, 768, 768],
+        "input_channels": [96, 96, 192, 192, 384, 384, 384, 384, 384, 384, 384,
+                           384, 384, 384, 384, 768],
+        "output_channels": [96, 192, 192, 384, 384, 384, 384, 384, 384, 384,
+                            384, 384, 384, 384, 768, 768],
         "kernel_q": [
             [3, 3, 3],
             [3, 3, 3],
@@ -328,5 +393,6 @@ def get_tgt_mask(seq_len):
     Build a diagonal mask with the aim to stop transformer from cheating by
     looking ahead in the given tgt tensor.
     """
-    return torch.triu(torch.ones((seq_len, seq_len), dtype=torch.bool),
+    mask = torch.triu(torch.ones((seq_len, seq_len), dtype=torch.bool),
                       diagonal=1)
+    return mask

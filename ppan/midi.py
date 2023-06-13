@@ -21,8 +21,12 @@ class PPAnMidi:
                                     nb_velocities=1)
         self.vocab_len = len(self.tokenizer)
         self.max_len = max_len
+        self.pad = self.tokenizer["PAD_None"]
+        self.eos = self.tokenizer["EOS_None"]
+        self.bos = self.tokenizer["BOS_None"]
 
-    def __call__(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor,
+                                                 torch.Tensor]:
         """
         Calls self.tokenize_midi
         """
@@ -31,7 +35,7 @@ class PPAnMidi:
     def tokenize_midi(self,
                       midi,
                       timestamps: Tuple[float, float]) -> \
-            Tuple[torch.Tensor, torch.Tensor]:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Extract a section from a midi based on timestamps and tokenize it.
         This implementation is a little absurd, but It's what I came up with
@@ -44,7 +48,7 @@ class PPAnMidi:
 
         Returns
         -------
-        tokens : Tuple[torch.Tensor, torch.Tensor]
+        tokens : Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         """
         new_midi = mido.MidiFile(type=0)
         new_track = mido.MidiTrack()
@@ -73,25 +77,25 @@ class PPAnMidi:
 
             if len(tokens) != 0:
                 tokens = list(tokens[0])
-
-            tokens.insert(0, self.tokenizer["BOS_None"])
-
             if len(tokens) > self.max_len-1:
-                print(len(tokens))
-                tokens = tokens[:self.max_len-2]
-            tokens.append(self.tokenizer["EOS_None"])
+                tokens = tokens[:self.max_len-1]
 
-            while len(tokens) < self.max_len:
-                tokens.append(self.tokenizer["PAD_None"])
+            bos_tokens = [self.bos, *tokens]
+            eos_tokens = [*tokens, self.eos]
 
-        tokens = torch.tensor(tokens, dtype=torch.long)
+            while len(bos_tokens) < self.max_len:
+                bos_tokens.append(self.pad)
+                eos_tokens.append(self.pad)
+
+        bos_tokens = torch.tensor(bos_tokens, dtype=torch.long)
+        eos_tokens = torch.tensor(eos_tokens, dtype=torch.long)
 
         padding_mask = torch.squeeze(
-            torch.where(tokens == self.tokenizer["PAD_None"],
+            torch.where(bos_tokens == self.pad,
                         True,
                         False))
 
-        return tokens, padding_mask
+        return bos_tokens, eos_tokens, padding_mask
 
     def tokens_to_midi(self, tokens: torch.Tensor):
         tokens = torch.unsqueeze(tokens, dim=1)
