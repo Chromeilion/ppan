@@ -7,12 +7,13 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.models.video.mvit import MViT_V2_S_Weights
 from tqdm import tqdm
 
-from ppan.config import device, seq_len
+from ppan.config import device, seq_len, d_model
 from ppan.dataset import Rach3Dataset, VID_BACKEND, worker_init_fn, \
     load_data, split_data, DatasetOutput
 from ppan.midi import compute_piano_img
 from ppan.model import PPAnModel
 from ppan.types import PathLike
+from ppan.scheduler import ScheduledOptim
 
 
 def main(dataset_dir: PathLike,
@@ -43,26 +44,31 @@ def main(dataset_dir: PathLike,
         if not os.path.exists("./checkpoints"):
             os.mkdir("./checkpoints")
         output = "./checkpoints/best_model.tar"
-    if VID_BACKEND == "cuda":
-        # CUDA does not support the default fork method
-        torch.multiprocessing.set_start_method("spawn")
 
     # TODO: Dont hardcode hyperparamaters
     """Dataset Config"""
-    batch_size = 4
-    epochs = 5
-    prefetch_factor = None
-    num_workers = 0
+    batch_size = 2
+    epochs = 20
+    prefetch_factor = 1  # None
+    num_workers = 1
     clip_len = 16
     sample_rate = 30
     max_samples_in_eval = 10
-    clips_per_vid = 100
+    clips_per_vid = 5
 
     """Optimizer Config"""
-    lr = 0.01
+    lr = 1e-3
+    b_1 = 0.9
+    b_2 = 0.98
+    eps = 1e-9
+
+    """Scheduler Config"""
+    n_warmup_steps = 4000
+    lr_mult = 0.5
 
     """Model Config"""
-    n_decoder_layers = 6
+    n_decoder_layers = 12
+    n_heads = int(d_model / 64)
 
     """Tensorboard Config"""
     eval_every = 40
@@ -95,11 +101,12 @@ def main(dataset_dir: PathLike,
     model = PPAnModel(encoder_weights=weights,
                       n_tokens=vocab_size,
                       seq_len=seq_len,
-                      emb_dim=768,
+                      emb_dim=d_model,
                       n_decoder_layers=n_decoder_layers,
                       bos_token=train.tokenizer.bos,
                       eos_token=train.tokenizer.eos,
-                      pad_token=train.tokenizer.pad)
+                      pad_token=train.tokenizer.pad,
+                      nhead=n_heads)
     model.to(device)
 
     if num_workers > 1:
@@ -122,7 +129,14 @@ def main(dataset_dir: PathLike,
         worker_init_fn=worker_init_func
     )
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=train.tokenizer.pad)
-    optimizer = torch.optim.SGD(params=model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(params=model.parameters(),
+                                 lr=lr,
+                                 betas=(b_1, b_2),
+                                 eps=eps)
+    scheduler = ScheduledOptim(optimizer=optimizer,
+                               d_model=d_model,
+                               n_warmup_steps=n_warmup_steps,
+                               lr_mul=lr_mult)
     best_loss = torch.inf
     global_step = 0
     test_step = 0
@@ -147,9 +161,9 @@ def main(dataset_dir: PathLike,
                 model=model,
                 loss_fn=loss_fn
             )
-            optimizer.zero_grad()
+            scheduler.zero_grad()
             loss.backward()
-            optimizer.step()
+            scheduler.step_and_update_lr()
 
             preds_max = torch.argmax(pred, dim=1)
             if torch.equal(preds_max, target):
@@ -273,3 +287,7 @@ def pred_image_workflow(target, pred, dataset):
                           pred_img],
                          2)
     return comp_img
+
+
+def calc_lr(step, emb_dim, warmup_steps):
+    return emb_dim**(-0.5) * min(step**(-0.5), step*warmup_steps**(-1.5))

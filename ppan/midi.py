@@ -5,7 +5,7 @@ import cv2
 import mido
 import numpy as np
 import torch
-from miditok import Structured
+from miditok import REMI
 from miditoolkit import MidiFile
 from miditoolkit.pianoroll import parser as pr_parser
 
@@ -15,15 +15,22 @@ class PPAnMidi:
     Class for handling midi operations. Things like tokenization and loading.
     """
     def __init__(self, max_len: int):
-        special_tokens = ["BOS", "EOS", "PAD"]
-        self.tokenizer = Structured(pitch_range=(range(0, 127)),
-                                    special_tokens=special_tokens,
-                                    nb_velocities=1)
+        special_tokens = ["BOS", "EOS", "PAD", "BRK"]
+        additional_tokens = {"rest_range": (2, 16),
+                             "Rest": True,
+                             "Chord": False,
+                             "Tempo": False,
+                             "Program": False}
+        self.tokenizer = REMI(pitch_range=(range(0, 127)),
+                              additional_tokens=additional_tokens,
+                              special_tokens=special_tokens,
+                              nb_velocities=1)
         self.vocab_len = len(self.tokenizer)
         self.max_len = max_len
         self.pad = self.tokenizer["PAD_None"]
         self.eos = self.tokenizer["EOS_None"]
         self.bos = self.tokenizer["BOS_None"]
+        self.brk = self.tokenizer["BRK_None"]
 
     def __call__(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor,
                                                  torch.Tensor]:
@@ -79,6 +86,8 @@ class PPAnMidi:
                 tokens = list(tokens[0])
             if len(tokens) > self.max_len-1:
                 tokens = tokens[:self.max_len-1]
+            if len(tokens) == 0:
+                tokens.append(self.brk)  # add break token if no notes
 
             bos_tokens = [self.bos, *tokens]
             eos_tokens = [*tokens, self.eos]

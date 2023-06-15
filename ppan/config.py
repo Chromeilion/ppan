@@ -12,6 +12,9 @@ torch.manual_seed(seed)
 random.seed(seed)
 np.random.seed(seed)
 
+# Model configuration
+d_model = 768
+
 # Default sequence length for midi tokens sequences.
 seq_len = 110
 
@@ -24,6 +27,7 @@ seq_len = 110
 try:
     if device.type == "cuda":
         torchvision.set_video_backend("cuda")
+        torch.multiprocessing.set_start_method("spawn")
         VID_BACKEND = "cuda"
     else:
         torchvision.set_video_backend("video_reader")

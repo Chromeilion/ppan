@@ -105,7 +105,7 @@ class PPAnModel(nn.Module):
                  bos_token: int,
                  eos_token: int,
                  pad_token: int,
-                 nhead: int = 2,
+                 nhead: int = 10,
                  seq_len: int = 110,
                  encoder_weights: Optional[MViT_V2_S_Weights] = None,
                  n_decoder_layers: Optional[int] = None,
