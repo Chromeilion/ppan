@@ -1,22 +1,21 @@
-import math
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 
 import torch
 from torch import nn
 from torchvision.models.video import MViT_V2_S_Weights, MViT
 from torchvision.models.video.mvit import _unsqueeze, _ovewrite_named_param, \
     MSBlockConfig, WeightsEnum
+import timm
 
 from ppan.config import device
 
 
-class PPAnMViT(MViT):
+class HeadlessMViT(MViT):
     """
     A headless version of the MViT implementation in PyTorch. original code
     found here:
     https://github.com/pytorch/vision/blob/main/torchvision/models/video/mvit.py
     """
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Convert if necessary (B, C, H, W) -> (B, C, 1, H, W)
         x = _unsqueeze(x, 5, 2)[0]
@@ -36,7 +35,30 @@ class PPAnMViT(MViT):
         return x
 
 
-class Encoder(nn.Module):
+class ImageClassifier(nn.Module):
+    def __init__(self,
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mvit = timm.create_model(
+                'mvitv2_tiny.fb_in1k',
+                pretrained=True,
+                num_classes=0,  # remove classifier nn.Linear
+            )
+        self.heads = [
+            nn.Sequential(
+                nn.Dropout(0.2),
+                nn.Linear(768, 2)
+            ).to(device) for _ in range(88)
+        ]
+
+    def forward(self, x: torch.Tensor):
+        x = self.mvit(x)
+        x = torch.stack([i(x) for i in self.heads])
+        x = torch.swapaxes(x, 0, 1)
+        return x
+
+
+class VideoEncoder(nn.Module):
     def __init__(self,
                  seq_len: int,
                  mvit_weights,
@@ -107,7 +129,8 @@ class PPAnModel(nn.Module):
                  pad_token: int,
                  nhead: int = 10,
                  seq_len: int = 110,
-                 encoder_weights: Optional[MViT_V2_S_Weights] = None,
+                 encoder_weights: Optional[Union[MViT_V2_S_Weights, str]] =
+                 None,
                  n_decoder_layers: Optional[int] = None,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -119,7 +142,7 @@ class PPAnModel(nn.Module):
         self.pad = pad_token
         self.n_tokens = n_tokens
 
-        self.encoder = Encoder(
+        self.encoder = VideoEncoder(
             seq_len=seq_len,
             mvit_weights=encoder_weights
         )
@@ -232,7 +255,7 @@ def _mvit_ppan(
     spatial_size = kwargs.pop("spatial_size", (224, 224))
     temporal_size = kwargs.pop("temporal_size", 16)
 
-    model = PPAnMViT(
+    model = HeadlessMViT(
         spatial_size=spatial_size,
         temporal_size=temporal_size,
         block_setting=block_setting,

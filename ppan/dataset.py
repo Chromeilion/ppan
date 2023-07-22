@@ -1,8 +1,7 @@
-import itertools
 import random
 from typing import List, Tuple, Optional, Callable, TypedDict
+import itertools
 
-import mido
 import numpy as np
 import torch
 import torchvision
@@ -10,11 +9,12 @@ from rach3datautils.utils.dataset import DatasetUtils
 from torch.utils.data import IterableDataset
 
 from ppan.config import VID_BACKEND
-from ppan.midi import PPAnMidi
+from ppan.preprocessing.midi import PPAnMidi
+from ppan.preprocessing.video import PPAnVideoPreprocesser
 from ppan.types import PathLike
 
 
-class DatasetOutput(TypedDict):
+class VideoDatasetOutput(TypedDict):
     path: str
     video: torch.Tensor
     tgt_in: torch.Tensor
@@ -24,151 +24,75 @@ class DatasetOutput(TypedDict):
     end: float
 
 
-class Rach3Dataset(IterableDataset):
+class BaseDataset(IterableDataset):
     """
-    Dataset object for training on the Rach3 dataset. Handles loading and
-    preprocessing all necessary files.
+    Base class for PPAn datasets.
     """
-
-    def __init__(self, samples: List[Tuple[PathLike, PathLike, PathLike]],
-                 seq_len: int,
+    def __init__(self,
+                 samples: List[Tuple[PathLike, PathLike, PathLike]],
+                 clips_per_vid: Optional[int] = None,
                  epoch_size: Optional[int] = None,
                  frame_transform: Optional[Callable] = None,
                  video_transform: Optional[Callable] = None,
-                 clip_len: Optional[int] = None,
-                 clips_per_vid: Optional[int] = None,
-                 sample_rate: Optional[int] = None,
                  start: Optional[float] = None,
                  end: Optional[float] = None,
-                 shuffle_every_loop: Optional[bool] = None):
+                 shuffle_every_loop: Optional[bool] = None,
+                 temporal_res: Optional[float] = None,
+                 ):
         """
         Parameters
         ----------
-        shuffle_every_loop : bool
-            Whether to shuffle the samples every time the generator is called
-        clips_per_vid : int
-            Maximum number of clips to be loaded per video. Defaults to 100
         samples : List[Tuple[PathLike, PathLike, PathLike]]
             [midi_path, flac_path, video_path]
-        seq_len : int
-            maximum length of token sequence
         epoch_size : Optional[int]
-            defaults to len(samples)
         frame_transform : Optional[Callable]
-            Transform to be applied per frame
         video_transform : Optional[Callable]
-            Transform to be applied per video
-        clip_len : Optional[int]
-            The amount of frames per video. Defaults to 16
-        sample_rate : Optional[int]
-            FPS basically, defaults to 60
         start : Optional[float]
-            float from zero to one, where to start in the dataset. For example,
-            0.5 is in the middle
         end : Optional[float]
-            Same as start but for the end
+        shuffle_every_loop : Optional[bool]
+            whether to shuffle the dataset every time a new generator loop is
+            started.
+        temporal_res : Optional[float]
+            The distance in seconds between yielded frames.
         """
-        if clip_len is None:
-            clip_len = 16
-        if sample_rate is None:
-            sample_rate = 60
+        if temporal_res is None:
+            temporal_res = 0.05
+        if shuffle_every_loop is None:
+            shuffle_every_loop = False
         if start is None:
             start = 0
         if end is None:
             end = 1
         if clips_per_vid is None:
             clips_per_vid = 100
-        if shuffle_every_loop is None:
-            shuffle_every_loop = False
+
+        self.temporal_res = temporal_res
 
         self.shuffle = shuffle_every_loop
         self.samples = samples
 
         self.start = int(len(self.samples) * start)
-        self.end = int(len(self.samples) * end)
+        if np.isclose(end, 1):
+            self.end=None
+        else:
+            self.end = int(len(self.samples) * end) + 1
 
         self.samples = self.samples[self.start:self.end]
         random.shuffle(self.samples)
+
         self.clips_per = clips_per_vid
 
         if epoch_size is None:
             epoch_size = len(self.samples)
 
-        self.clip_len: int = clip_len
         self.epoch_size: int = epoch_size
         self.frame_transform: Optional[Callable] = frame_transform
         self.video_transform: Optional[Callable] = video_transform
-        self.sample_rate = sample_rate
 
-        self.tokenizer = PPAnMidi(seq_len)
-        self.vocab_len = self.tokenizer.vocab_len
+        self.midi = PPAnMidi()
+        self.vocab_len = self.midi.vocab_len
 
-    def __iter__(self) -> DatasetOutput:
-        if self.shuffle:
-            random.shuffle(self.samples)
-
-        for i in range(self.epoch_size):
-            midi_path, flac_path, video_path = self.samples[i]
-
-            video = torchvision.io.VideoReader(str(video_path), "video")
-
-            metadata = video.get_metadata()
-            video_frames = []
-            sample_ratio = int(np.ceil(self.get_fps(metadata)) //
-                               self.sample_rate)
-            max_seek = self.get_duration(metadata) - \
-                (self.clip_len * sample_ratio / self.get_fps(metadata))
-            max_seek_frame = int(max_seek * self.get_fps(metadata))
-            start = random.uniform(0., max_seek / 4)
-            prev = start
-            start_frame = int(start * self.get_fps(metadata))
-            midi_file = mido.MidiFile(midi_path)
-            clip_no = 0
-            for frame_no, frame in enumerate(itertools.islice(
-                    video.seek(start), max_seek_frame - start_frame)):
-                if frame_no % sample_ratio != 0:
-                    continue
-
-                current_pts = start + frame_no*(1/self.get_fps(metadata))
-
-                frame_data = frame['data']
-
-                if VID_BACKEND == "cuda":
-                    frame_data = torch.swapaxes(frame_data, 0, 2)
-
-                if self.frame_transform is not None:
-                    frame_data = self.frame_transform(frame_data)
-
-                video_frames.append(torch.swapaxes(frame_data, 1, 2))
-                if len(video_frames) == self.clip_len:
-
-                    stacked_frames = torch.stack(video_frames, 0)
-                    if self.video_transform is not None:
-                        stacked_frames = self.video_transform(stacked_frames)
-
-                    bos_tokens, eos_tokens, padding_mask = self.tokenizer(
-                        midi_file,
-                        (prev, current_pts)
-                    )
-                    output = {
-                        'path': str(video_path),
-                        'video': stacked_frames,
-                        'tgt_in': bos_tokens,
-                        'target': eos_tokens,
-                        'padding_mask': padding_mask,
-                        'start': prev,
-                        'end': current_pts
-                    }
-                    yield output
-                    video_frames = []
-                    prev = current_pts
-                    clip_no += 1
-
-                if clip_no >= self.clips_per:
-                    break
-
-    def __len__(self):
-        return len(self.samples) * self.clips_per
+        self.video_processor = PPAnVideoPreprocesser()
 
     @staticmethod
     def get_fps(metadata):
@@ -182,32 +106,99 @@ class Rach3Dataset(IterableDataset):
             return metadata["video"]["duration"]
         return metadata["video"]["duration"][0]
 
+    def __len__(self):
+        return len(self.samples) * self.clips_per
 
-def split_data(samples: List[Tuple[PathLike, PathLike, PathLike]],
-               percentage: float):
+
+class ImageVecDataset(BaseDataset):
     """
-    Split the dataset into train and test sets according to percentage size of
-    test.
-    This method is approximate. The split is not exactly according to the given
-    percentage.
-
-    Parameters
-    ----------
-    percentage : float
-        between zero and one, what percentage of the entire dataset the test
-        set is.
-    samples : List[Tuple[PathLike, PathLike, PathLike]]
-
-    Returns
-    -------
-    train : List[Tuple[PathLike, PathLike, PathLike]]
-    test : List[Tuple[PathLike, PathLike, PathLike]]
+    Dataset object for training on the Rach3 dataset. Handles loading and
+    preprocessing all necessary files.
+    Gives images plus vector representation of current notes being played.
     """
-    samples = np.array(samples)
-    mask = np.random.rand(len(samples)) <= percentage
-    train = samples[~mask]
-    test = samples[mask]
-    return train, test
+    # We need to decode a certain amount of frames before the actual timestamp
+    # we want because we'll have corrupt data otherwise.
+    # This is because of the way video and specifically keyframes work.
+    # If the GPU decoding returned a pts, we could seek to just keyframes and
+    # use those. This would save a lot of time. But no, they haven't
+    # implemented that.
+    FRAMES_PER_SAMPLE = 30
+
+    def __init__(self, samples: List[Tuple[PathLike, PathLike, PathLike]],
+                 tokenizer=None,
+                 *args, **kwargs):
+        super().__init__(samples, *args, **kwargs)
+        self.tokenizer = tokenizer
+
+    def __iter__(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.shuffle:
+            random.shuffle(self.samples)
+
+        for i in range(self.epoch_size):
+            midi_path, flac_path, video_path = self.samples[i]
+
+            video = torchvision.io.VideoReader(str(video_path), "audio")
+            metadata = video.get_metadata()
+            duration = metadata["video"]["duration"]
+            frametime = 1. / self.get_fps(metadata)
+
+            self.midi.set_midi(midi_path)
+
+            # Pick a random point to start at. Remember that we need to decode
+            # an amount of frames before the start point, so we need to allow
+            # for that with some space at the start.
+            # Additionally, we expect a certain amount of clips per video,
+            # therefore, we need to leave enough space at the end of the video
+            # to be able to generate these.
+            decoding_space = self.FRAMES_PER_SAMPLE * frametime
+            start = random.uniform(
+                0. + decoding_space,
+                duration - self.temporal_res*(self.clips_per+9)
+            )
+            times = np.linspace(start,
+                                start+(self.temporal_res*(self.clips_per+9)),
+                                self.clips_per+9)
+
+            counter = 0
+            for time in times:
+                # Decode some amount of frames before the one we want
+                decode_start = time - decoding_space
+                for _ in itertools.islice(video.seek(decode_start), None,
+                                          self.FRAMES_PER_SAMPLE-1):
+                    ...
+
+                # Get the frame we want
+                vid_next = next(video)
+                frame_data = vid_next['data']
+
+                # CUDA has a different API than the other backends, so gotta
+                # swap some axis
+                if VID_BACKEND == "cuda":
+                    frame_data = torch.swapaxes(frame_data, 0, 2)
+                    frame_data = torch.swapaxes(frame_data, 1, 2)
+
+                # Crop out the section of the image that is always not a piano
+                frame_data = frame_data[:, 400:, :]
+
+                if self.frame_transform is not None:
+                    frame_data = self.frame_transform(
+                        frame_data, return_tensor="pt")
+
+                note_vec = self.midi.midi_to_vec(
+                    timestamps=(time, time+frametime)
+                )
+                notes = self.midi.note_vec_to_sentence(note_vec)
+
+                if notes is not False:
+                    if self.tokenizer is not None:
+                        notes = self.tokenizer(notes, padding='max_length',
+                                               return_tensors="pt")
+                    counter += 1
+                    yield {"pixel_values": frame_data.pixel_values[0],
+                           "labels": torch.squeeze(notes.input_ids)}
+
+                if counter >= self.clips_per:
+                    break
 
 
 def load_data(root: PathLike):
@@ -238,13 +229,3 @@ def load_data(root: PathLike):
                                         i.video.splits_list)]
 
     return samples
-
-
-def worker_init_fn(worker_id):
-    worker_info = torch.utils.data.get_worker_info()
-    dataset = worker_info.dataset
-    per_worker = 1 / float(worker_info.num_workers)
-    worker_id = worker_info.id
-
-    dataset.start = worker_id * per_worker
-    dataset.end = min(dataset.start + per_worker, 1)

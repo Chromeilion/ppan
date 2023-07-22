@@ -6,7 +6,7 @@ import torchvision
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Lets at least try to have some reproducibility
+# Lets try to have some reproducibility
 seed = 42
 torch.manual_seed(seed)
 random.seed(seed)
@@ -27,7 +27,6 @@ seq_len = 110
 try:
     if device.type == "cuda":
         torchvision.set_video_backend("cuda")
-        torch.multiprocessing.set_start_method("spawn")
         VID_BACKEND = "cuda"
     else:
         torchvision.set_video_backend("video_reader")
