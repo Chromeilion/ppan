@@ -63,8 +63,6 @@ class BaseDataset(IterableDataset):
             start = 0
         if end is None:
             end = 1
-        if clips_per_vid is None:
-            clips_per_vid = 100
 
         self.temporal_res = temporal_res
 
@@ -151,13 +149,16 @@ class ImageVecDataset(BaseDataset):
             # therefore, we need to leave enough space at the end of the video
             # to be able to generate these.
             decoding_space = self.FRAMES_PER_SAMPLE * frametime
+            if self.clips_per is None:
+                self.clips_per = int((duration - decoding_space) / \
+                                     self.temporal_res)
             start = random.uniform(
                 0. + decoding_space,
-                duration - self.temporal_res*(self.clips_per+9)
+                duration - self.temporal_res*self.clips_per
             )
             times = np.linspace(start,
-                                start+(self.temporal_res*(self.clips_per+9)),
-                                self.clips_per+9)
+                                start+(self.temporal_res*self.clips_per),
+                                self.clips_per)
 
             counter = 0
             for time in times:
@@ -167,8 +168,12 @@ class ImageVecDataset(BaseDataset):
                                           self.FRAMES_PER_SAMPLE-1):
                     ...
 
-                # Get the frame we want
-                vid_next = next(video)
+                # Get the frame we want. In some edge case due to some
+                # imprecise timings we may get an error, so catch that.
+                try:
+                    vid_next = next(video)
+                except StopIteration:
+                    continue
                 frame_data = vid_next['data']
 
                 # CUDA has a different API than the other backends, so gotta
@@ -187,18 +192,15 @@ class ImageVecDataset(BaseDataset):
                 note_vec = self.midi.midi_to_vec(
                     timestamps=(time, time+frametime)
                 )
-                notes = self.midi.note_vec_to_sentence(note_vec)
+                notes_str = self.midi.note_vec_to_sentence(note_vec)
 
-                if notes is not False:
+                if notes_str:
                     if self.tokenizer is not None:
-                        notes = self.tokenizer(notes, padding='max_length',
+                        notes = self.tokenizer(notes_str, padding='max_length',
                                                return_tensors="pt")
                     counter += 1
-                    yield {"pixel_values": frame_data.pixel_values[0],
+                    yield {"pixel_values": torch.tensor(frame_data.pixel_values[0]),
                            "labels": torch.squeeze(notes.input_ids)}
-
-                if counter >= self.clips_per:
-                    break
 
 
 def load_data(root: PathLike):

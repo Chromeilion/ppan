@@ -1,10 +1,8 @@
+from typing import Optional
 from pathlib import Path
 
 from transformers import (
-    AutoTokenizer
-)
-
-from transformers import (
+    AutoTokenizer,
     VisionEncoderDecoderModel,
     AutoImageProcessor,
     Trainer,
@@ -21,12 +19,15 @@ def main(dataset_dir: PathLike,
          output_dir: PathLike,
          decoder_checkpoint: PathLike,
          tokenizer_dir: PathLike,
+         checkpoint_dir: Optional[PathLike],
          *_, **__):
     """
     Training function for PPAn.
 
     Parameters
     ----------
+    checkpoint_dir : Optional[PathLike]
+        Checkpoint directory from which to resume training.
     tokenizer_dir : PathLike
     dataset_dir : PathLike
         Directory with train and test set in their own folders.
@@ -39,21 +40,25 @@ def main(dataset_dir: PathLike,
     -------
     None
     """
+    if checkpoint_dir:
+        checkpoint_dir = checkpoint_dir[0]
     train_image(dataset_dir=dataset_dir[0],
                 output_dir=output_dir[0],
                 decoder_checkpoint=decoder_checkpoint[0],
-                tokenizer_dir=tokenizer_dir[0])
+                tokenizer_dir=tokenizer_dir[0],
+                checkpoint_dir=checkpoint_dir)
 
 
 def train_image(dataset_dir: PathLike, output_dir: PathLike,
-                decoder_checkpoint: PathLike, tokenizer_dir: PathLike):
+                decoder_checkpoint: PathLike, tokenizer_dir: PathLike,
+                checkpoint_dir: Optional[PathLike] = None):
     # TODO: Dont hardcode hyperparamaters
     """Dataset Config"""
-    epochs = 20
-    temporal_res = 1
-    clips_per_vid = 5
-    eval_every = 200
-    save_every = 300
+    epochs = 400
+    temporal_res = 10
+    clips_per_vid = 3
+    eval_every = 300
+    save_every = 500
 
     """Optimizer Config"""
     lr = 1e-5
@@ -63,14 +68,18 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
     scheduler_type = "cosine"
 
     """What Encoder to Use"""
-    pretrained_encoder = "facebook/vit-mae-base"
-
-    model = VisionEncoderDecoderModel.from_encoder_decoder_pretrained(
-        pretrained_encoder,
-        decoder_checkpoint
-    ).train().to(device)
+    pretrained_encoder = "google/vit-base-patch16-224"
     tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(
         tokenizer_dir)
+
+#    model = VisionEncoderDecoderModel.from_encoder_decoder_pretrained(
+#        pretrained_encoder,
+#        decoder_checkpoint
+#    ).train().to(device)
+    model = VisionEncoderDecoderModel.from_pretrained(
+        "/home/chromeilion/Code/Uni/uni2023S/thesis/coding/testing_data/vit"
+        "-base-checkpoint-8000/"
+    ).to(device).train()
     tokenizer.model_max_length = 20
     model.config.decoder_start_token_id = tokenizer.cls_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
@@ -95,7 +104,6 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
         temporal_res=temporal_res,
         clips_per_vid=clips_per_vid,
         tokenizer=tokenizer,
-        shuffle_every_loop=True,
         frame_transform=processor
     )
     training_arguments = TrainingArguments(
@@ -111,6 +119,7 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
         warmup_ratio=warmup_ratio,
         seed=seed,
         optim="adamw_torch",
+        weight_decay=0.01,
         auto_find_batch_size=True,
         save_steps=save_every,
         do_predict=True
@@ -119,6 +128,6 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
         model=model,
         args=training_arguments,
         train_dataset=train,
-        eval_dataset=test
+        eval_dataset=test,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=checkpoint_dir)

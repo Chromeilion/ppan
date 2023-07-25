@@ -53,9 +53,18 @@ def main():
         help="Location of pretrained decoder",
         required=True
     )
+    parser_train.add_argument(
+        "-r", "--checkpoint-dir",
+        nargs=1,
+        action="store",
+        type=str,
+        help="Location of a training checkpoint when continuing training.",
+        required=False,
+        default=None
+    )
     parser_train.set_defaults(func=train.main)
 
-    parser_eval = subparsers.add_parser("eval",
+    parser_eval = subparsers.add_parser("evaluate",
                                         help="Evaluate the model on a "
                                              "testset.")
     parser_eval.add_argument(
@@ -63,11 +72,27 @@ def main():
         **dataset_dir_kwargs
     )
     parser_eval.add_argument(
-        "-m", "--model-dir",
+        "-m", "--model-checkpoint",
         nargs=1,
         action="store",
         type=str,
         help="Path to the saved model.",
+        required=True
+    )
+    parser_eval.add_argument(
+        "-o", "--output-dir",
+        nargs=1,
+        action="store",
+        type=str,
+        help="Where to save the trained model, full path with filename.",
+        required=True,
+    )
+    parser_eval.add_argument(
+        "-t", "--tokenizer-dir",
+        nargs=1,
+        action="store",
+        type=str,
+        help="Location of pretrained tokenizer folder.",
         required=True
     )
     parser_eval.set_defaults(func=evaluate.main)
