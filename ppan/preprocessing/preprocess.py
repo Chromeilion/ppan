@@ -1,12 +1,12 @@
-from typing import Union, Optional
 from pathlib import Path
-
-from ppan.preprocessing import midi
-from ppan.dataset import load_data
-from ppan.types import PathLike
+from typing import Union, Optional
 
 import pandas as pd
 from tqdm import tqdm
+
+from ppan.dataset import load_data
+from ppan.preprocessing import midi
+from ppan.types import PathLike
 
 
 def preprocess(samples, output: Union[str, Path]):

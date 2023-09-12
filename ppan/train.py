@@ -1,5 +1,6 @@
-from typing import Optional
+from torch import multiprocessing
 from pathlib import Path
+from typing import Optional
 
 from transformers import (
     AutoTokenizer,
@@ -10,7 +11,7 @@ from transformers import (
     PreTrainedTokenizerFast
 )
 
-from ppan.config import device, seed
+from ppan.config import seed, pretrained_encoder, main_res, VID_BACKEND
 from ppan.dataset import load_data, ImageVecDataset
 from ppan.types import PathLike
 
@@ -54,36 +55,42 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
                 checkpoint_dir: Optional[PathLike] = None):
     # TODO: Dont hardcode hyperparamaters
     """Dataset Config"""
-    epochs = 400
-    temporal_res = 10
-    clips_per_vid = 3
+    max_steps = 30000
+    temporal_res = 3
+    clips_per_vid = 8
     eval_every = 300
-    save_every = 500
+    save_every = 300
+    batch_size = 4
 
     """Optimizer Config"""
     lr = 1e-5
+    weight_decay = 1e-4
 
     """Scheduler Config"""
-    warmup_ratio = 0.2
+    warmup_ratio = 0.15
     scheduler_type = "cosine"
 
     """What Encoder to Use"""
-    pretrained_encoder = "google/vit-base-patch16-224"
     tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(
         tokenizer_dir)
 
-#    model = VisionEncoderDecoderModel.from_encoder_decoder_pretrained(
-#        pretrained_encoder,
-#        decoder_checkpoint
-#    ).train().to(device)
-    model = VisionEncoderDecoderModel.from_pretrained(
-        "/home/chromeilion/Code/Uni/uni2023S/thesis/coding/testing_data/vit"
-        "-base-checkpoint-8000/"
-    ).to(device).train()
+    """Model Config"""
+    image_size = main_res
+
+#    model = VisionEncoderDecoderModel.from_pretrained(
+#        "/home/chromeilion/Code/Uni/uni2023S/thesis/coding/testing_data"
+#        "/model-2.0-68000/")
+    model = VisionEncoderDecoderModel.from_encoder_decoder_pretrained(
+        pretrained_encoder,
+        decoder_checkpoint,
+        encoder_image_size=image_size,
+        encoder_ignore_mismatched_sizes=True
+    ).train()
     tokenizer.model_max_length = 20
     model.config.decoder_start_token_id = tokenizer.cls_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
-    processor = AutoImageProcessor.from_pretrained(pretrained_encoder)
+    processor = AutoImageProcessor.from_pretrained(pretrained_encoder,
+                                                   size=image_size)
 
     dataset = Path(dataset_dir)
     train_dir = dataset.joinpath("train")
@@ -91,7 +98,6 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
 
     train = load_data(train_dir)
     test = load_data(test_dir)
-
     train = ImageVecDataset(
         samples=train,
         temporal_res=temporal_res,
@@ -101,28 +107,31 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
     )
     test = ImageVecDataset(
         samples=test,
-        temporal_res=temporal_res,
-        clips_per_vid=clips_per_vid,
+        temporal_res=10,
+        clips_per_vid=2,
         tokenizer=tokenizer,
-        frame_transform=processor
+        frame_transform=processor,
+        epoch_size=1
     )
     training_arguments = TrainingArguments(
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
         output_dir=str(output_dir),
         evaluation_strategy="steps",
         eval_steps=eval_every,
         logging_steps=eval_every,
-        num_train_epochs=epochs,
+        max_steps=max_steps,
         learning_rate=lr,
         do_train=True,
         do_eval=True,
         lr_scheduler_type=scheduler_type,
         warmup_ratio=warmup_ratio,
         seed=seed,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
         optim="adamw_torch",
-        weight_decay=0.01,
-        auto_find_batch_size=True,
-        save_steps=save_every,
-        do_predict=True
+        weight_decay=weight_decay,
+        save_steps=save_every
     )
     trainer = Trainer(
         model=model,
@@ -130,4 +139,5 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
         train_dataset=train,
         eval_dataset=test,
     )
+    multiprocessing.set_start_method("spawn", force=True)
     trainer.train(resume_from_checkpoint=checkpoint_dir)

@@ -1,11 +1,11 @@
 from typing import Optional, Dict, List, Any, Union
 
+import timm
 import torch
 from torch import nn
 from torchvision.models.video import MViT_V2_S_Weights, MViT
 from torchvision.models.video.mvit import _unsqueeze, _ovewrite_named_param, \
     MSBlockConfig, WeightsEnum
-import timm
 
 from ppan.config import device
 

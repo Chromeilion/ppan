@@ -1,15 +1,14 @@
-from typing import Tuple, Union
-from pathlib import Path
 import warnings
+from pathlib import Path
+from typing import Optional
+from typing import Tuple, Union
 
 import mido
-from mido.midifiles.meta import KeySignatureError
 import numpy as np
 import numpy.typing as npt
 import partitura as pt
 import partitura.utils as ptu
 from partitura.performance import Performance
-from typing import Optional
 from tqdm import tqdm
 
 
@@ -18,33 +17,38 @@ class PPAnMidi:
     Class for handling midi operations. Things like tokenization and loading.
     """
     TIME_DIV = 120
-    # Convert midi notes to their names, taken frome here:
+    # Convert midi notes to their names, taken from here:
     # https://gist.github.com/devxpy/063968e0a2ef9b6db0bd6af8079dad2a
     NOTES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#',
              'b']
     OCTAVES = list(range(11))
     NOTES_IN_OCTAVE = len(NOTES)
+    PIANO_SHIFT = 21
 
-    def __init__(self, max_len: Optional[int] = None):
-        """
-        Parameters
-        ----------
-        max_len : Optional[int]
-            if max_len is not provided the tokenizer will not be initialized
-        """
+    def __init__(self):
         self.midi_filepath = None
         self._performance = None
         self._pianoroll = None
-        self.vocab_len = None
+        self.midi_file = None
+        self._note_array = None
 
-        if max_len is not None:
-            self.midi_file = None
+        self.time_div = self.TIME_DIV
+        self.notes = self.NOTES
+        self.octaves = self.OCTAVES
+        self.notes_in_octave = self.NOTES_IN_OCTAVE
+        self.piano_shift = self.PIANO_SHIFT
 
     def number_to_note(self, number: int) -> str:
-        octave = number // self.NOTES_IN_OCTAVE
-        note = self.NOTES[number % self.NOTES_IN_OCTAVE]
+        octave = number // self.notes_in_octave
+        note = self.notes[number % self.notes_in_octave]
 
         return note + str(octave)
+
+    def note_to_number(self, note: str) -> int:
+        octave = int(note[-1])
+        note_no = self.NOTES.index(note[:-1])
+
+        return octave * self.notes_in_octave + note_no + self.piano_shift
 
     def set_midi(self, midi_filepath):
         """
@@ -59,21 +63,26 @@ class PPAnMidi:
         self.midi_file = mido.MidiFile(midi_filepath)
         self._performance = None
         self._pianoroll = None
+        self._note_array = None
+
+    @property
+    def note_array(self):
+        if self._note_array is None:
+            self._note_array = self.performance.note_array()
+        return self._note_array
 
     @property
     def duration(self):
-        note_offs = [i['note_off'] for i in self.performance.performedparts[0].notes]
+        note_offs = [
+            i['note_off'] for i in self.performance.performedparts[0].notes
+        ]
         return max(note_offs)
 
     @property
     def performance(self) -> Performance:
         if self._performance is None:
             self._performance = pt.load_performance_midi(self.midi_filepath)
-            # Remove peddle, as we're only interested in whether the key is
-            # pressed
-            self._performance.performedparts[0].controls = []
-            for i in self._performance.performedparts[0].notes:
-                i['sound_off'] = i['note_off']
+
         return self._performance
 
     @property
@@ -85,10 +94,10 @@ class PPAnMidi:
                     self.performance,
                     piano_range=True,
                     time_unit="sec",
-                    time_div=self.TIME_DIV,
+                    time_div=self.time_div,
                     remove_silence=False,
                     binary=True
-                ).toarray()
+                ).toarray().astype(bool)
         return self._pianoroll
 
     def pianoroll_window(self, timestamps: Tuple[float, float]):
@@ -104,12 +113,13 @@ class PPAnMidi:
         -------
         pianoroll_window : npt.NDArray
         """
-        start = int(timestamps[0] // (1/self.TIME_DIV))
-        end = int(timestamps[1] // (1/self.TIME_DIV))
+        start = int(timestamps[0] / (1/self.time_div))
+        end = int(timestamps[1] / (1/self.time_div))
 
         return self.pianoroll[:, start:end]
 
-    def midi_to_vec(self, timestamps: Tuple[float, float]):
+    def midi_to_notes(self,
+                      timestamps: Tuple[float, float]) -> npt.NDArray[int]:
         """
         Generate a vector slice of all notes played between two timestamps.
 
@@ -122,34 +132,50 @@ class PPAnMidi:
         -------
         note_vec : npt.NDArray
         """
-        pianoroll_seg = self.pianoroll_window(timestamps=timestamps)
-        nonzero = np.argwhere(pianoroll_seg != 0)
-        note_vec = np.zeros(shape=(pianoroll_seg.shape[0], 1), dtype=bool)
+        notes = np.array([
+            i['midi_pitch'] for i in self.performance[0].notes if
+            timestamps[1] > i['note_on'] > timestamps[0] or
+            i['note_on'] < timestamps[0] < i['note_off']
+        ])-self.piano_shift
+        if any(notes > 87) or any(notes < 0):
+            raise AttributeError("The note array seems to be invalid")
+        return self.notes_to_sentence(notes)
 
-        if nonzero.shape == (0, 2):
-            return note_vec
-
-        for i in nonzero[:, 0]:
-            note_vec[i, :] = 1
-
-        return note_vec
-
-    def note_vec_to_sentence(self, note_vec):
+    def notes_to_sentence(self, notes):
         """
         Convert a note_vec to a list of notes as strings.
 
         Parameters
         ----------
-        note_vec : npt.NDArray[bool]
+        notes : npt.NDArray[int]
 
         Returns
         -------
         notes : List[str]
         """
-        notes = np.argwhere(np.squeeze(note_vec)).tolist()
-        notes = [self.number_to_note(i[0]) for i in notes]
+        notes = [self.number_to_note(i) for i in notes]
         notes = " ".join(notes)
+
         return notes
+
+    def sentence_to_note_vec(self, sentence: list[str]):
+        note_array = np.zeros(shape=(128, 1), dtype=bool)
+        if not sentence:
+            return note_array
+        elif not sentence[0]:
+            return note_array
+
+        split_sentence = sentence[0].split(" ")
+        notes = [self.note_to_number(i) for i in split_sentence]
+        for i in notes:
+            note_array[i, :] = 1
+        return note_array
+
+    def sentences_to_pianoroll(self, sentences: list[list]):
+        pianoroll = np.array([self.sentence_to_note_vec(i) for i in sentences],
+                             dtype=bool)
+        pianoroll = pianoroll.T
+        return np.squeeze(pianoroll)
 
 
 def extract_sentences(samples: list[Union[str, Path]],
@@ -195,7 +221,6 @@ def extract_sentences(samples: list[Union[str, Path]],
 
         times = np.arange(0, midi_duration, stride)
         for time in times:
-            note_vec = loader.midi_to_vec((time, time+window_size))
-            sentence = loader.note_vec_to_sentence(note_vec=note_vec)
+            sentence = loader.midi_to_notes((time, time+window_size))
             sentences.append((sentence, str(sample_no+start)))
     return sentences

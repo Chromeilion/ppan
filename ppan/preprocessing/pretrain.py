@@ -1,6 +1,7 @@
-from pathlib import Path
 import random
+from pathlib import Path
 
+import datasets
 from tokenizers import (
     decoders,
     models,
@@ -18,7 +19,6 @@ from transformers import (
     BertConfig,
     DataCollatorForLanguageModeling,
 )
-import datasets
 
 from ppan.config import seed
 from ppan.types import PathLike

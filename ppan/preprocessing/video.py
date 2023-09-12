@@ -4,8 +4,8 @@ import torchvision
 from torchvision.models.video.mvit import MViT_V2_S_Weights
 from torchvision.ops import masks_to_boxes
 from torchvision.transforms.functional import autocontrast
+
 from ppan.config import device
-import matplotlib.pyplot as plt
 
 
 class LinearRegressionModel(torch.nn.Module):
