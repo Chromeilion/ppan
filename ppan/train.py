@@ -11,8 +11,8 @@ from transformers import (
     PreTrainedTokenizerFast
 )
 
-from ppan.config import seed, pretrained_encoder, main_res, VID_BACKEND
-from ppan.dataset import load_data, ImageVecDataset
+from ppan.config import seed, pretrained_encoder, main_res
+from ppan.dataset import load_data, ImageVecDataset, load_ytmidi
 from ppan.types import PathLike
 
 
@@ -88,12 +88,12 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
     processor = AutoImageProcessor.from_pretrained(pretrained_encoder,
                                                    size=image_size)
 
-    dataset = Path(dataset_dir)
-    train_dir = dataset.joinpath("train")
-    test_dir = dataset.joinpath("test")
-
-    train = load_data(train_dir)
-    test = load_data(test_dir)
+#    dataset = Path(dataset_dir)
+#    train_dir = dataset.joinpath("train")
+#    test_dir = dataset.joinpath("test")
+    train, test = load_ytmidi(dataset_dir)
+#    train = load_data(train_dir)
+#    test = load_data(test_dir)
     train = ImageVecDataset(
         samples=train,
         temporal_res=temporal_res,

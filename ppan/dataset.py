@@ -1,4 +1,4 @@
-import time
+from pathlib import Path
 import os
 import itertools
 import random
@@ -447,9 +447,10 @@ def load_ytmidi(root: PathLike):
     samples_train = []
     samples_test = []
     for i in data:
+        video = os.path.join(root, f'videos/{Path(i[0]).name}')
         crop = [int(j) for j in i[4:]]
         tup = (os.path.join(root, f'pianoyt_MIDI/audio_{i[1]}.0.midi'),
-               None, i[0], crop)
+               None, video, crop)
         if i[3] == "1":
             samples_train.append(tup)
         elif i[3] == "3":
