@@ -146,10 +146,6 @@ class ImageVecDataset(BaseDataset):
                             if self.tokenizer is not None:
                                 notes = self.tokenizer(i[1], padding='max_length',
                                                        return_tensors="pt")
-                            if i[0].size() != (3, 448, 448):
-                                continue
-                            elif notes.input_ids.size()[1] > 20:
-                                continue
                             yield {"pixel_values": i[0],
                                    "labels": torch.squeeze(notes.input_ids),
                                    "interpolate_pos_encoding": True}
@@ -296,7 +292,6 @@ def _load(sample_seed, FRAMES_PER_SAMPLE, clips_per,
         notes_str = midi.midi_to_notes(
             timestamps=(time-frametime/2, time+frametime/2)
         )
-        print(notes_str)
         return_list.append((img, notes_str))
 
     return return_list
