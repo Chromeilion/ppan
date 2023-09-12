@@ -1,5 +1,4 @@
 from torch import multiprocessing
-from typing import Optional
 
 from transformers import (
     AutoTokenizer,
@@ -59,7 +58,7 @@ def train_image(dataset_dir: PathLike, dataset_type: str,
         pretrained_note_model)
     det_model = ViTForImageClassification.from_pretrained(pretrained_det_model)
 
-    tokenizer.model_max_length = 20
+    tokenizer.model_max_length = 30
     note_model.config.decoder_start_token_id = tokenizer.cls_token_id
     note_model.config.pad_token_id = tokenizer.pad_token_id
     note_processor = AutoImageProcessor.from_pretrained(pretrained_encoder,

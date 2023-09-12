@@ -296,6 +296,7 @@ def _load(sample_seed, FRAMES_PER_SAMPLE, clips_per,
         notes_str = midi.midi_to_notes(
             timestamps=(time-frametime/2, time+frametime/2)
         )
+        print(notes_str)
         return_list.append((img, notes_str))
 
     return return_list

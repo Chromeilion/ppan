@@ -60,7 +60,6 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
     clips_per_vid = 8
     eval_every = 300
     save_every = 300
-    batch_size = 4
 
     """Optimizer Config"""
     lr = 1e-5
@@ -77,16 +76,13 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
     """Model Config"""
     image_size = main_res
 
-#    model = VisionEncoderDecoderModel.from_pretrained(
-#        "/home/chromeilion/Code/Uni/uni2023S/thesis/coding/testing_data"
-#        "/model-2.0-68000/")
     model = VisionEncoderDecoderModel.from_encoder_decoder_pretrained(
         pretrained_encoder,
         decoder_checkpoint,
         encoder_image_size=image_size,
         encoder_ignore_mismatched_sizes=True
     ).train()
-    tokenizer.model_max_length = 20
+    tokenizer.model_max_length = 30
     model.config.decoder_start_token_id = tokenizer.cls_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
     processor = AutoImageProcessor.from_pretrained(pretrained_encoder,
@@ -114,8 +110,7 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
         epoch_size=1
     )
     training_arguments = TrainingArguments(
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
+        auto_find_batch_size=True,
         output_dir=str(output_dir),
         evaluation_strategy="steps",
         eval_steps=eval_every,
@@ -129,9 +124,10 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
         seed=seed,
         adam_beta1=0.9,
         adam_beta2=0.999,
-        optim="adamw_torch",
+        optim="adamw_torch_fused",
         weight_decay=weight_decay,
-        save_steps=save_every
+        save_steps=save_every,
+        torch_compile=True
     )
     trainer = Trainer(
         model=model,
