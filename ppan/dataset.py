@@ -16,7 +16,7 @@ from rach3datautils.utils.dataset import DatasetUtils
 from torch.utils.data import IterableDataset
 from torchvision.transforms import v2
 
-from ppan.config import VID_BACKEND
+from ppan.config import VID_BACKEND, device
 from ppan.preprocessing.midi import PPAnMidi
 from ppan.preprocessing.video import PPAnVideoPreprocesser
 from ppan.types import PathLike
@@ -44,7 +44,8 @@ class BaseDataset(IterableDataset):
                  video_transform: Optional[Callable] = None,
                  shuffle_every_loop: Optional[bool] = None,
                  temporal_res: Optional[float] = None,
-                 rotate: bool = False
+                 rotate: bool = False,
+                 frame_dist_time: Optional[float] = None
                  ):
         """
         Parameters
@@ -64,7 +65,10 @@ class BaseDataset(IterableDataset):
             temporal_res = 0.05
         if shuffle_every_loop is None:
             shuffle_every_loop = False
+        if frame_dist_time is None:
+            frame_dist_time = 0.5
 
+        self.frame_dist_time = frame_dist_time
         self.temporal_res = temporal_res
         self.rotate = rotate
         self.shuffle = shuffle_every_loop
@@ -107,21 +111,13 @@ class ImageVecDataset(BaseDataset):
     preprocessing all necessary files.
     Gives images plus vector representation of current notes being played.
     """
-    # We need to decode a certain amount of frames before the actual timestamp
-    # we want because we'll have corrupt data otherwise.
-    # This is because of the way video and specifically keyframes work.
-    # If the GPU decoding returned a pts, we could seek to just keyframes and
-    # use those. This would save a lot of time. But no, they haven't
-    # implemented that.
-    FRAMES_PER_SAMPLE = 5
-
     def __init__(self, samples: List[Tuple[PathLike, PathLike, PathLike]],
                  tokenizer=None,
                  *args, **kwargs):
         super().__init__(samples, *args, **kwargs)
         self.tokenizer = tokenizer
-        self.augment = v2.Compose([
-            v2.RandomCrop(size=(1950, 1900))])
+        self.augment = v2.Compose([v2.Grayscale(num_output_channels=3),
+                                   v2.RandomVerticalFlip()])
 
     def __call__(self, *args, **kwargs):
         return self.__iter__()
@@ -129,11 +125,11 @@ class ImageVecDataset(BaseDataset):
     def __iter__(self) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.shuffle:
             random.shuffle(self.samples)
-        with Pool(4) as p:
+        with Pool(5) as p:
             for _ in range(self.epoch_size):
                 seeds = [random.randint(0, 10000) for _ in self.samples]
                 for data in p.imap(partial(_load,
-                                           FRAMES_PER_SAMPLE=self.FRAMES_PER_SAMPLE,
+                                           frame_dist_time=self.frame_dist_time,
                                            clips_per=self.clips_per,
                                            temporal_res=self.temporal_res,
                                            frame_transform=self.frame_transform,
@@ -144,27 +140,34 @@ class ImageVecDataset(BaseDataset):
                     for i in data:
                         if i[1]:
                             if self.tokenizer is not None:
-                                notes = self.tokenizer(i[1], padding='max_length',
+                                notes = self.tokenizer(i[1],
+                                                       padding='max_length',
                                                        return_tensors="pt")
+                                if len(notes) > 30:
+                                    continue
                             yield {"pixel_values": i[0],
-                                   "labels": torch.squeeze(notes.input_ids),
-                                   "interpolate_pos_encoding": True}
+                                   "labels": torch.squeeze(notes.input_ids)}
 
 
 class EvalDataset(ImageVecDataset):
     """
     Simplified dataloader focussed solely around evaluation.
     """
+    def __init__(self, samples: List[Tuple[PathLike, PathLike, PathLike]],
+                 *args, **kwargs):
+        super().__init__(samples, *args, **kwargs)
+        self.augment = v2.Grayscale(num_output_channels=3)
+
     def __iter__(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        frame_dist_time = 0.1
         for i in self.samples:
             try:
                 for j in _eval_load(
                     sample=i,
-                    frame_dist_time=frame_dist_time,
+                    frame_dist_time=self.frame_dist_time,
                     temporal_res=self.temporal_res,
                     rotate=self.rotate,
-                    tokenizer=self.tokenizer
+                    tokenizer=self.tokenizer,
+                    augment=self.augment
                 ):
                     yield j
             except RuntimeError:
@@ -172,17 +175,15 @@ class EvalDataset(ImageVecDataset):
 
 
 class PlayingDataset(BaseDataset):
-    FRAMES_PER_SAMPLE = 35
-
     def __init__(self, samples: List[Tuple[PathLike, PathLike, PathLike]],
-                 tokenizer=None,
+                 tokenizer=None, processes: int = 4,
                  *args, **kwargs):
         super().__init__(samples, *args, **kwargs)
         self.tokenizer = tokenizer
-        torchvision.disable_beta_transforms_warning()
-        self.augment = v2.Compose([
-            v2.RandomCrop(size=(1950, 1900)),
-            v2.RandomHorizontalFlip(p=0.5)])
+        self.augment = v2.Compose([v2.Grayscale(num_output_channels=3),
+                                   v2.RandomVerticalFlip(),
+                                   v2.RandomHorizontalFlip()])
+        self.processes = processes
 
     def __call__(self, *args, **kwargs):
         return self.__iter__()
@@ -190,11 +191,11 @@ class PlayingDataset(BaseDataset):
     def __iter__(self) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.shuffle:
             random.shuffle(self.samples)
-        with Pool(4) as p:
+        with Pool(self.processes) as p:
             for _ in range(self.epoch_size):
-                seeds = [random.randint(0, 10000) for i in self.samples]
+                seeds = [random.randint(0, 10000) for _ in self.samples]
                 for data in p.imap(partial(_load,
-                                           FRAMES_PER_SAMPLE=self.FRAMES_PER_SAMPLE,
+                                           frame_dist_time=self.frame_dist_time,
                                            clips_per=self.clips_per,
                                            temporal_res=self.temporal_res,
                                            frame_transform=self.frame_transform,
@@ -204,13 +205,13 @@ class PlayingDataset(BaseDataset):
                                    zip(self.samples, seeds)):
                     for i in data:
                         if i[1]:
-                            label = 1
+                            label = 1.
                         else:
-                            label = 0
+                            label = 0.
                         yield {"pixel_values": i[0], "label": label}
 
 
-def _load(sample_seed, FRAMES_PER_SAMPLE, clips_per,
+def _load(sample_seed, frame_dist_time, clips_per,
           temporal_res, frame_transform, augment, rotate):
     crop = None
     if len(sample_seed[0]) == 4:
@@ -227,7 +228,6 @@ def _load(sample_seed, FRAMES_PER_SAMPLE, clips_per,
     duration = BaseDataset.get_duration(metadata)
     frametime = 1. / BaseDataset.get_fps(metadata)
 
-    frame_dist_time = 0.1
     frame_dist = int(frame_dist_time/frametime)
 
     midi = PPAnMidi()
@@ -239,8 +239,10 @@ def _load(sample_seed, FRAMES_PER_SAMPLE, clips_per,
     # Additionally, we expect a certain amount of clips per video,
     # therefore, we need to leave enough space at the end of the video
     # to be able to generate these.
+    decode_frames = 70
+    decode_time = decode_frames * frametime
     start = random.uniform(
-        0.,
+        0.+decode_time,
         duration - temporal_res * clips_per - frame_dist_time*3
     )
     times = np.linspace(start,
@@ -248,42 +250,34 @@ def _load(sample_seed, FRAMES_PER_SAMPLE, clips_per,
                         clips_per)
     return_list = []
     for time in times:
-        video.seek(time)
-        frame_data_prev = next(video)['data']
+        video.seek(time-decode_time-frame_dist_time)
+        for _ in itertools.islice(video, None, decode_frames):
+            ...
+        frame_data_prev = next(video)['data'].to(device)
         for _ in itertools.islice(video, None, frame_dist - 1):
             ...
         frame_mid = next(video)
-        time = frame_mid['pts']
-        frame_data_mid = frame_mid['data']
+        frame_data_mid = frame_mid['data'].to(device)
         for _ in itertools.islice(video, None, frame_dist - 1):
             ...
-        frame_data_next = next(video)['data']
-
+        frame_data_next = next(video)['data'].to(device)
+        stacked_frames = torch.stack([frame_data_prev, frame_data_mid,
+                                     frame_data_next], dim=0)
         # CUDA has a different API than the other backends, so gotta
         # swap some axis
         if VID_BACKEND == "cuda":
-            frame_data_prev = fix_cuda_axes(frame_data_prev)
-            frame_data_mid = fix_cuda_axes(frame_data_mid)
-            frame_data_next = fix_cuda_axes(frame_data_next)
+            stacked_frames = fix_cuda_axes(stacked_frames)
 
         if crop is not None:
-            frame_data_prev = do_crop(frame_data_prev, crop)
-            frame_data_mid = do_crop(frame_data_mid, crop)
-            frame_data_next = do_crop(frame_data_next, crop)
+            stacked_frames = do_crop(stacked_frames, crop)
 
         if rotate:
-            frame_data_prev = f.rotate(frame_data_prev, 180)
-            frame_data_mid = f.rotate(frame_data_mid, 180)
-            frame_data_next = f.rotate(frame_data_next, 180)
+            stacked_frames = f.rotate(stacked_frames, 180)
 
-        frame_data_prev = resize_correct(frame_data_prev)
-        frame_data_mid = resize_correct(frame_data_mid)
-        frame_data_next = resize_correct(frame_data_next)
-
-        img = combine_imgs(frame_data_prev, frame_data_mid, frame_data_next)
-
-        img = augment(img)
-
+        stacked_frames = resize_correct(stacked_frames)
+        stacked_frames = augment(stacked_frames)
+        img = combine_imgs(stacked_frames)
+        del stacked_frames
         if frame_transform is not None:
             img = frame_transform(
                 img, return_tensors="pt")
@@ -297,7 +291,8 @@ def _load(sample_seed, FRAMES_PER_SAMPLE, clips_per,
     return return_list
 
 
-def _eval_load(sample, frame_dist_time, temporal_res, rotate, tokenizer):
+def _eval_load(sample, frame_dist_time, temporal_res, rotate, tokenizer,
+               augment):
     crop = None
     if len(sample) == 4:
         midi_path, flac_path, video_path, crop = sample
@@ -324,31 +319,27 @@ def _eval_load(sample, frame_dist_time, temporal_res, rotate, tokenizer):
 
         current_time = rotlist[frame_dist+1]['pts'] - frame_dist * frametime
 
-        frame_data_prev = rotlist[0]['data']
-        frame_data_mid = rotlist[frame_dist+1]['data']
-        frame_data_next = frame['data']
+        frame_data_prev = rotlist[0]['data'].to(device)
+        frame_data_mid = rotlist[frame_dist+1]['data'].to(device)
+        frame_data_next = frame['data'].to(device)
+
+        stacked_frames = torch.stack([frame_data_prev, frame_data_mid,
+                                     frame_data_next], dim=0)
+
         # CUDA has a different API than the other backends, so gotta
         # swap some axis
         if VID_BACKEND == "cuda":
-            frame_data_prev = fix_cuda_axes(frame_data_prev)
-            frame_data_mid = fix_cuda_axes(frame_data_mid)
-            frame_data_next = fix_cuda_axes(frame_data_next)
+            stacked_frames = fix_cuda_axes(stacked_frames)
 
         if crop is not None:
-            frame_data_prev = do_crop(frame_data_prev, crop)
-            frame_data_mid = do_crop(frame_data_mid, crop)
-            frame_data_next = do_crop(frame_data_next, crop)
+            stacked_frames = do_crop(stacked_frames, crop)
 
         if rotate:
-            frame_data_prev = f.rotate(frame_data_prev, 180)
-            frame_data_mid = f.rotate(frame_data_mid, 180)
-            frame_data_next = f.rotate(frame_data_next, 180)
+            stacked_frames = f.rotate(stacked_frames, 180)
 
-        frame_data_prev = resize_correct(frame_data_prev)
-        frame_data_mid = resize_correct(frame_data_mid)
-        frame_data_next = resize_correct(frame_data_next)
-
-        img = combine_imgs(frame_data_prev, frame_data_mid, frame_data_next)
+        stacked_frames = resize_correct(stacked_frames)
+        stacked_frames = augment(stacked_frames)
+        img = combine_imgs(stacked_frames)
 
         try:
             notes_str = midi.midi_to_notes(
@@ -367,7 +358,7 @@ def _eval_load(sample, frame_dist_time, temporal_res, rotate, tokenizer):
                 notes = notes_str
         else:
             notes = []
-
+        img.share_memory_()
         yield {"pixel_values": img,
                "labels": notes,
                "midi_path": str(midi_path),
@@ -375,16 +366,16 @@ def _eval_load(sample, frame_dist_time, temporal_res, rotate, tokenizer):
                'time': current_time}
 
 
-def combine_imgs(im1, im2, im3):
-    img = torch.zeros(size=(im2.size()[0],
-                            680 * 3,
-                            im2.size()[2]),
-                      dtype=torch.uint8).to(im2.device)
+def combine_imgs(img):
+    new_img = torch.zeros(size=(img.size()[1],
+                          680 * 3,
+                          img.size()[3]),
+                          dtype=torch.uint8).to(img.device)
 
-    img[:, :680, :] = im1
-    img[:, 680:1360, :] = im2
-    img[:, 1360:2040, :] = im3
-    return img
+    new_img[:, :680, :] = img[0]
+    new_img[:, 680:1360, :] = img[1]
+    new_img[:, 1360:2040, :] = img[2]
+    return new_img
 
 
 def resize_correct(img):
@@ -394,8 +385,8 @@ def resize_correct(img):
 
 
 def fix_cuda_axes(img):
-    img = torch.swapaxes(img, 0, 2)
-    img = torch.swapaxes(img, 1, 2)
+    img = torch.swapaxes(img, 1, 3)
+    img = torch.swapaxes(img, 2, 3)
     return img
 
 

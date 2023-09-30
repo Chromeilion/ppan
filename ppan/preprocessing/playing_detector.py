@@ -1,3 +1,5 @@
+from torch.optim import SGD
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import multiprocessing
 from pathlib import Path
 from typing import Optional
@@ -6,11 +8,12 @@ from transformers import (
     ViTImageProcessor,
     ViTForImageClassification,
     Trainer,
-    TrainingArguments
+    TrainingArguments,
+    get_scheduler
 )
 
-from ppan.config import seed, pretrained_playing_det_vit, det_res
-from ppan.dataset import load_data, PlayingDataset
+from ppan.config import seed, pretrained_playing_det_vit, det_res, device
+from ppan.dataset import load_data, PlayingDataset, load_ytmidi
 from ppan.types import PathLike
 
 
@@ -50,15 +53,15 @@ def train_playing_detector(dataset_dir: PathLike,
                            checkpoint_dir: Optional[PathLike] = None):
     # TODO: Dont hardcode hyperparamaters
     """Dataset Config"""
-    temporal_res = 3
-    clips_per_vid = 6
-    eval_every = 250
-    save_every = 250
-    max_steps = 50000
+    temporal_res = 2
+    clips_per_vid = 5
+    eval_every = 200
+    save_every = 200
+    max_steps = 10000
 
     """Optimizer Config"""
-    lr = 1e-5
-    weight_decay = 0.001
+    lr = 0.001
+    weight_decay = 0.0001
 
     """Scheduler Config"""
     warmup_ratio = 0.1
@@ -69,20 +72,26 @@ def train_playing_detector(dataset_dir: PathLike,
 
     model = ViTForImageClassification.from_pretrained(
         "/home/chromeilion/Code/Uni/uni2023S/thesis/coding/testing_data"
-        "/checkpoint-31250/",
+        "/detector_v2/checkpoint-7800/",
         image_size=image_size,
+        num_labels=1,
         ignore_mismatched_sizes=True,
-        num_labels=2
-    ).train()
-    processor = ViTImageProcessor(size=image_size)
-
+        problem_type="regression"
+    ).train().to(device)
+    processor = ViTImageProcessor(do_resize=True,
+                                  size=image_size)
+    optimizer = SGD(params=model.parameters(), lr=lr, momentum=0.9)
+    lr_sched = CosineAnnealingLR(optimizer, max_steps)
     dataset = Path(dataset_dir)
     train_dir = dataset.joinpath("train")
     test_dir = dataset.joinpath("test")
-
+    train_yt, test_yt = load_ytmidi("/home/chromeilion/Code/Uni/uni2023S"
+                                    "/thesis/coding/external_test_data"
+                                    "/PianoYT/")
     train = load_data(train_dir)
     test = load_data(test_dir)
-
+    train.extend(train_yt)
+    test.extend(test_yt)
     train = PlayingDataset(
         samples=train,
         temporal_res=temporal_res,
@@ -92,7 +101,7 @@ def train_playing_detector(dataset_dir: PathLike,
     test = PlayingDataset(
         samples=test,
         temporal_res=temporal_res,
-        clips_per_vid=clips_per_vid,
+        clips_per_vid=2,
         frame_transform=processor,
         epoch_size=1
     )
@@ -103,19 +112,16 @@ def train_playing_detector(dataset_dir: PathLike,
         evaluation_strategy="steps",
         eval_steps=eval_every,
         logging_steps=eval_every,
-        learning_rate=lr,
         do_train=True,
         do_eval=True,
-        lr_scheduler_type=scheduler_type,
         warmup_ratio=warmup_ratio,
         seed=seed,
-        optim="adamw_torch",
-        weight_decay=weight_decay,
-        auto_find_batch_size=True,
         save_steps=save_every,
-        dataloader_drop_last=True
+        per_device_train_batch_size=6,
+        per_device_eval_batch_size=6
     )
     trainer = Trainer(
+        optimizers=(optimizer, lr_sched),
         model=model,
         args=training_arguments,
         train_dataset=train,

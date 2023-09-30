@@ -64,7 +64,7 @@ def evaluate(dataset_dir: PathLike, output: PathLike,
              model_checkpoint: PathLike, tokenizer_dir: PathLike,
              youtubemidi: PathLike, miditest: PathLike,
              detector_checkpoint: PathLike):
-    temporal_res = 1/4
+    temporal_res = 1/30
     model = VisionEncoderDecoderModel.from_pretrained(
         model_checkpoint
     ).eval().to(device)
@@ -72,48 +72,51 @@ def evaluate(dataset_dir: PathLike, output: PathLike,
     tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(
         tokenizer_dir
     )
-    tokenizer.model_max_length = 20
+    tokenizer.model_max_length = 30
     model.config.decoder_start_token_id = tokenizer.cls_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
     generation_config = GenerationConfig(
-        max_new_tokens=10,
+        max_new_tokens=30,
         min_new_tokens=1,
         num_beams=10,
         pad_token_id=tokenizer.pad_token_id,
-        decoder_start_token_id=tokenizer.cls_token_id
+        decoder_start_token_id=tokenizer.cls_token_id,
+        length_penalty=2,
+        eos_token_id=tokenizer.eos_token_id,
+        bos_token_id=tokenizer.bos_token_id
     )
     image_processor_main = AutoImageProcessor.from_pretrained(pretrained_encoder,
                                                               image_size=main_res)
-    image_processor_det = AutoImageProcessor.from_pretrained(pretrained_encoder,
+    image_processor_det = AutoImageProcessor.from_pretrained(pretrained_playing_det_vit,
                                                              image_size=det_res)
     preds_yt, preds_midi, preds_rach3 = None, None, None
-    multiprocessing.set_start_method("spawn", force=True)
 
-#    if miditest is not None:
-#        miditest = load_miditest(miditest)
-#        dataset = EvalDataset(
-#            samples=miditest,
-#            rotate=True,
-#            tokenizer=tokenizer,
-#            temporal_res=temporal_res
-#        )
-#        dataloader = DataLoader(dataset=dataset, batch_size=1, num_workers=1,
-#                                prefetch_factor=2)
-#        preds_midi = eval_loop(dataset=dataloader, model=model,
-#                               generation_config=generation_config,
-#                               tokenizer=tokenizer, detector=detector,
-#                               det_ft=image_processor_det,
-#                               main_ft=image_processor_main,
-#                               length=len(miditest))
+    multiprocessing.set_start_method("spawn")
+
+    if miditest is not None:
+        miditest = load_miditest(miditest)
+        dataset = EvalDataset(
+            samples=miditest,
+            rotate=True,
+            temporal_res=temporal_res
+        )
+        dataloader = DataLoader(dataset=dataset, batch_size=1, num_workers=1,
+                                prefetch_factor=2)
+        preds_midi = eval_loop(dataset=dataloader, model=model,
+                               generation_config=generation_config,
+                               tokenizer=tokenizer, detector=detector,
+                               det_ft=image_processor_det,
+                               main_ft=image_processor_main,
+                               length=len(miditest))
 
     if dataset_dir is not None:
         samples = load_data(dataset_dir)
         dataset = EvalDataset(
             samples=samples,
-            tokenizer=tokenizer,
             temporal_res=temporal_res
         )
-        dataloader = DataLoader(dataset=dataset, batch_size=1)
+        dataloader = DataLoader(dataset=dataset, batch_size=1,
+                                num_workers=1, prefetch_factor=1)
         preds_rach3 = eval_loop(dataset=dataloader, model=model,
                                 generation_config=generation_config,
                                 tokenizer=tokenizer, detector=detector,
@@ -123,9 +126,9 @@ def evaluate(dataset_dir: PathLike, output: PathLike,
 
     if youtubemidi is not None:
         _, ytmidi_test = load_ytmidi(youtubemidi)
+        ytmidi_test = ytmidi_test
         dataset = EvalDataset(
             samples=ytmidi_test,
-            tokenizer=tokenizer,
             temporal_res=temporal_res,
             rotate=True
         )
@@ -159,37 +162,26 @@ def eval_loop(dataset, model, generation_config, tokenizer, detector,
             if prev_file != midi_path:
                 pbar.update()
                 preds[prev_path]["sentences"] = sentences
-                preds[prev_path]["pianoroll"] = pianoroll
-                preds[prev_path]["frametime"] = frametime
+                preds[prev_path]["time"] = current_time
                 sentences = []
-            if isinstance(i["labels"], list):
-                label = []
-            else:
-                label = tokenizer.batch_decode(
-                    i["labels"],
-                    skip_special_tokens=True,
-                )
-            pixel_values_det = det_ft(i["pixel_values"],
+            pixel_values_det = det_ft(torch.squeeze(i["pixel_values"]),
                                       return_tensors='pt',
                                       size=det_res).to(device)
-            det_out = detector(**pixel_values_det)
-            det_pred = torch.argmax(det_out.logits)
-            if det_pred == 0:
-                sentences.append(([], label))
+            det_out = detector(pixel_values_det['pixel_values'])
+            det_pred = float(det_out.logits)
             pixel_values_main = main_ft(i["pixel_values"],
                                         return_tensors='pt',
                                         size=main_res).to(device)
-            generated_ids = model.generate(**pixel_values_main,
+            generated_ids = model.generate(pixel_values_main['pixel_values'],
                                            generation_config=generation_config)
             generated_text = tokenizer.batch_decode(
                 generated_ids,
                 skip_special_tokens=True)[0].split(" ")
-            label = [j for j in label if j]
-            sentences.append((generated_text, label))
+
+            sentences.append((det_pred, generated_text, i['labels']))
             prev_file = midi_path
-            pianoroll = torch.squeeze(i["pianoroll"])
-            frametime = i["frametime"]
             prev_path = i["midi_path"][0]
+            current_time = i['time']
 
     return preds
 

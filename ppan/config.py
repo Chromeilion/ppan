@@ -19,7 +19,7 @@ torchvision.disable_beta_transforms_warning()
 pretrained_encoder = "google/vit-base-patch16-224-in21k"
 main_res = (224, 224)
 pretrained_playing_det_vit = "google/vit-base-patch16-224-in21k"
-det_res = (224, 224)
+det_res = (384, 384)
 # Default sequence length for midi tokens sequences.
 seq_len = 110
 

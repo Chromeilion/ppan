@@ -55,18 +55,18 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
                 checkpoint_dir: Optional[PathLike] = None):
     # TODO: Dont hardcode hyperparamaters
     """Dataset Config"""
-    max_steps = 30000
-    temporal_res = 3
+    max_steps = 50000
+    temporal_res = 2
     clips_per_vid = 8
-    eval_every = 300
-    save_every = 300
+    eval_every = 500
+    save_every = 500
 
     """Optimizer Config"""
     lr = 1e-5
     weight_decay = 1e-4
 
     """Scheduler Config"""
-    warmup_ratio = 0.15
+    warmup_ratio = 0.1
     scheduler_type = "cosine"
 
     """What Encoder to Use"""
@@ -88,12 +88,16 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
     processor = AutoImageProcessor.from_pretrained(pretrained_encoder,
                                                    size=image_size)
 
-#    dataset = Path(dataset_dir)
-#    train_dir = dataset.joinpath("train")
-#    test_dir = dataset.joinpath("test")
-    train, test = load_ytmidi(dataset_dir)
-#    train = load_data(train_dir)
-#    test = load_data(test_dir)
+    dataset = Path("/home/chromeilion/Code/Uni/uni2023S/thesis/coding"
+                   "/testing_data/preprocessed/dataset/")
+    train_dir = dataset.joinpath("train")
+    test_dir = dataset.joinpath("test")
+    train_yt, test_yt = load_ytmidi(dataset_dir)
+    train = load_data(train_dir)
+    test = load_data(test_dir)
+    train.extend(train_yt)
+    test.extend(test_yt)
+
     train = ImageVecDataset(
         samples=train,
         temporal_res=temporal_res,
@@ -124,10 +128,9 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
         seed=seed,
         adam_beta1=0.9,
         adam_beta2=0.999,
-        optim="adamw_torch_fused",
+        optim="adamw_torch",
         weight_decay=weight_decay,
-        save_steps=save_every,
-        torch_compile=True
+        save_steps=save_every
     )
     trainer = Trainer(
         model=model,
