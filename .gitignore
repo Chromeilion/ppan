@@ -238,3 +238,5 @@ runs/
 
 # Model checkpoint files
 checkpoints/
+
+idea/
