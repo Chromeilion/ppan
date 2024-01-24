@@ -1,25 +1,20 @@
 from torch import multiprocessing
-from pathlib import Path
 from typing import Optional
 
 from transformers import (
-    AutoTokenizer,
-    VisionEncoderDecoderModel,
-    AutoImageProcessor,
+    VideoMAEImageProcessor,
+    VideoMAEForVideoClassification,
     Trainer,
-    TrainingArguments,
-    PreTrainedTokenizerFast
+    TrainingArguments
 )
 
-from ppan.config import seed, pretrained_encoder, main_res
-from ppan.dataset import load_data, ImageVecDataset, load_ytmidi
+from ppan.config import seed, pretrained_model
+from ppan.dataset import load_rach3, ImageVecDataset, load_ytmidi
 from ppan.types import PathLike
 
 
-def main(dataset_dir: PathLike,
+def main(dataset_dir: list[PathLike],
          output_dir: PathLike,
-         decoder_checkpoint: PathLike,
-         tokenizer_dir: PathLike,
          checkpoint_dir: Optional[PathLike],
          *_, **__):
     """
@@ -29,13 +24,10 @@ def main(dataset_dir: PathLike,
     ----------
     checkpoint_dir : Optional[PathLike]
         Checkpoint directory from which to resume training.
-    tokenizer_dir : PathLike
     dataset_dir : PathLike
         Directory with train and test set in their own folders.
     output_dir : PathLike
         Where to output training results.
-    decoder_checkpoint : PathLike
-        Location of pretrained BERT decoder.
 
     Returns
     -------
@@ -43,15 +35,12 @@ def main(dataset_dir: PathLike,
     """
     if checkpoint_dir:
         checkpoint_dir = checkpoint_dir[0]
-    train_image(dataset_dir=dataset_dir[0],
+    train_image(dataset_dir=dataset_dir,
                 output_dir=output_dir[0],
-                decoder_checkpoint=decoder_checkpoint[0],
-                tokenizer_dir=tokenizer_dir[0],
                 checkpoint_dir=checkpoint_dir)
 
 
-def train_image(dataset_dir: PathLike, output_dir: PathLike,
-                decoder_checkpoint: PathLike, tokenizer_dir: PathLike,
+def train_image(dataset_dir: list[PathLike], output_dir: PathLike,
                 checkpoint_dir: Optional[PathLike] = None):
     # TODO: Dont hardcode hyperparamaters
     """Dataset Config"""
@@ -69,52 +58,37 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
     warmup_ratio = 0.1
     scheduler_type = "cosine"
 
-    """What Encoder to Use"""
-    tokenizer: PreTrainedTokenizerFast = AutoTokenizer.from_pretrained(
-        tokenizer_dir)
-
-    """Model Config"""
-    image_size = main_res
-
-    model = VisionEncoderDecoderModel.from_encoder_decoder_pretrained(
-        pretrained_encoder,
-        decoder_checkpoint,
-        encoder_image_size=image_size,
-        encoder_ignore_mismatched_sizes=True
-    ).train()
-    tokenizer.model_max_length = 30
-    model.config.decoder_start_token_id = tokenizer.cls_token_id
-    model.config.pad_token_id = tokenizer.pad_token_id
-    processor = AutoImageProcessor.from_pretrained(pretrained_encoder,
-                                                   size=image_size)
-
-    dataset = Path("/home/chromeilion/Code/Uni/uni2023S/thesis/coding"
-                   "/testing_data/preprocessed/dataset/")
-    train_dir = dataset.joinpath("train")
-    test_dir = dataset.joinpath("test")
-    train_yt, test_yt = load_ytmidi(dataset_dir)
-    train = load_data(train_dir)
-    test = load_data(test_dir)
+    test, train = load_rach3(dataset_dir[0])
+    train_yt, test_yt = load_ytmidi(dataset_dir[1])
     train.extend(train_yt)
     test.extend(test_yt)
 
+    processor = VideoMAEImageProcessor.from_pretrained(
+        pretrained_model,
+        do_center_crop=False,
+        size={"height": 224, "width": 224}
+    )
+
     train = ImageVecDataset(
         samples=train,
-        temporal_res=temporal_res,
         clips_per_vid=clips_per_vid,
-        tokenizer=tokenizer,
-        frame_transform=processor
+        video_transform=processor
     )
     test = ImageVecDataset(
         samples=test,
-        temporal_res=10,
         clips_per_vid=2,
-        tokenizer=tokenizer,
-        frame_transform=processor,
+        video_transform=processor,
         epoch_size=1
     )
+
+    model = VideoMAEForVideoClassification.from_pretrained(
+        pretrained_model, problem_type="regression",
+        num_labels=128*2,
+        ignore_mismatched_sizes=True,
+        num_frames=7
+    ).train()
+
     training_arguments = TrainingArguments(
-        auto_find_batch_size=True,
         output_dir=str(output_dir),
         evaluation_strategy="steps",
         eval_steps=eval_every,
@@ -130,7 +104,8 @@ def train_image(dataset_dir: PathLike, output_dir: PathLike,
         adam_beta2=0.999,
         optim="adamw_torch",
         weight_decay=weight_decay,
-        save_steps=save_every
+        save_steps=save_every,
+        per_device_train_batch_size=8
     )
     trainer = Trainer(
         model=model,

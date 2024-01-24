@@ -16,26 +16,20 @@ np.random.seed(seed)
 torchvision.disable_beta_transforms_warning()
 
 # Model configuration
-pretrained_encoder = "google/vit-base-patch16-224-in21k"
+pretrained_model = "MCG-NJU/videomae-small-finetuned-kinetics"
 main_res = (224, 224)
-pretrained_playing_det_vit = "google/vit-base-patch16-224-in21k"
-det_res = (384, 384)
-# Default sequence length for midi tokens sequences.
-seq_len = 110
 
-# Choosing a video backend automatically. cuda and video_reader are much
-# faster than pyav, however, torchvision must be compiled from source in order
-# to have support for them. They're also only supported for Linux systems.
+# Cuda and video_reader backends are much faster than pyav, however,
+# torchvision must be compiled from source in order to have support for
+# them. They're also only supported for Linux systems.
 #
-# See here for instructions on getting it working:
+# Also, the cuda backend has a different API for some reason and doesn't
+# support some very important features. Honestly I wouldn't be surprised
+# if its buggy even, as there's been no update to the incomplete code in
+# 2 years.
+#
+# See here for instructions on getting the CUDA backend working (if you
+# hate yourself):
 # https://github.com/pytorch/vision/tree/main/torchvision/csrc/io/decoder/gpu
-try:
-    if device.type == "cuda":
-        torchvision.set_video_backend("pyav")
-        VID_BACKEND = "pyav"
-    else:
-        torchvision.set_video_backend("video_reader")
-        VID_BACKEND = "video_reader"
-except RuntimeError:
-    torchvision.set_video_backend("pyav")
-    VID_BACKEND = "pyav"
+torchvision.set_video_backend("video_reader")
+VID_BACKEND = "video_reader"

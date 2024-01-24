@@ -10,7 +10,7 @@ tensorboard
 partitura
 timm
 kornia
-transformers
+transformers[torch]
 matplotlib
 scikit-learn
 pandas

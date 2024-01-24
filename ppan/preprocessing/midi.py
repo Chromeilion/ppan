@@ -139,7 +139,35 @@ class PPAnMidi:
         ])-self.piano_shift
         if any(notes > 87) or any(notes < 0):
             raise AttributeError("The note array seems to be invalid")
-        return self.notes_to_sentence(notes)
+        return notes
+
+    def midi_to_onset_offset_vec(self,
+                      timestamps: Tuple[float, float]) -> npt.NDArray[int]:
+        """
+        Generate a pianoroll slice of all onsets and offsets played between two
+        timestamps. The first half of the vector corresponds to onsets, while
+        the second half corresponds to offsets.
+
+        Parameters
+        ----------
+        timestamps : Tuple[float, float]
+            start and end of the window in seconds
+
+        Returns
+        -------
+        note_vec : npt.NDArray
+        """
+        res_array = np.zeros(shape=128*2, dtype=np.single)
+        [
+            res_array.put(1, i['midi_pitch']-self.piano_shift) for i in self.performance[0].notes if
+            timestamps[1] > i['note_on'] > timestamps[0]
+        ]
+        [
+            res_array.put(1, i['midi_pitch']-self.piano_shift+self.PIANO_SHIFT) for i in
+            self.performance[0].notes if
+            timestamps[1] > i['note_off'] > timestamps[0]
+        ]
+        return res_array
 
     def notes_to_sentence(self, notes):
         """
@@ -176,6 +204,7 @@ class PPAnMidi:
                              dtype=bool)
         pianoroll = pianoroll.T
         return np.squeeze(pianoroll)
+
 
 
 def extract_sentences(samples: list[Union[str, Path]],
