@@ -17,3 +17,6 @@ pandas
 datasets
 torchvision
 av
+moviepy
+imageio
+plotly

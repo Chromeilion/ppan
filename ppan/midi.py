@@ -1,15 +1,16 @@
 import warnings
-from pathlib import Path
-from typing import Optional
-from typing import Tuple, Union
+from random import choice
+from typing import Tuple
 
 import mido
 import numpy as np
 import numpy.typing as npt
 import partitura as pt
 import partitura.utils as ptu
+import torch
 from partitura.performance import Performance
-from tqdm import tqdm
+
+from ppan.config import num_labels
 
 
 class PPAnMidi:
@@ -25,24 +26,59 @@ class PPAnMidi:
     NOTES_IN_OCTAVE = len(NOTES)
     PIANO_SHIFT = 21
 
-    def __init__(self):
+    def __init__(self, vid_len: float, temporal_res: float = None,
+                 lenience: int = None, percentage_negative: float = 0.05):
+
         self.midi_filepath = None
         self._performance = None
         self._pianoroll = None
         self.midi_file = None
         self._note_array = None
-
+        self.percentage_negative = percentage_negative
         self.time_div = self.TIME_DIV
         self.notes = self.NOTES
         self.octaves = self.OCTAVES
         self.notes_in_octave = self.NOTES_IN_OCTAVE
         self.piano_shift = self.PIANO_SHIFT
 
+        self._oo_array = None
+        self.temporal_res = temporal_res
+        self.lenience = lenience
+        self.vid_len = vid_len
+
+    @property
+    def oo_array(self) -> npt.NDArray[np.bool_]:
+        if self._oo_array is None:
+            _oo_array = np.zeros(shape=(num_labels,
+                                        int(self.vid_len//self.temporal_res)),
+                                 dtype=np.bool_)
+            for note in self.performance.performedparts[0].notes:
+                note_on_frame = int(note['note_on']//self.temporal_res)
+                _oo_array[note['midi_pitch']-self.PIANO_SHIFT,
+                          note_on_frame-self.lenience:note_on_frame+self.lenience] = 1
+            self._oo_array = _oo_array
+
+        return self._oo_array
+
+    def __call__(self, time: float, device: torch.device, dtype: torch.dtype):
+        return torch.tensor(self.oo_array[:, int(time//self.temporal_res)],
+                            device=device, dtype=dtype)
+
     def number_to_note(self, number: int) -> str:
         octave = number // self.notes_in_octave
         note = self.notes[number % self.notes_in_octave]
 
         return note + str(octave)
+
+    def get_all_onsets(self):
+        return [
+            i['note_on'] for i in self.performance.performedparts[0].notes
+        ]
+
+    def get_all_offsets(self):
+        return [
+            i['note_off'] for i in self.performance.performedparts[0].notes
+        ]
 
     def note_to_number(self, note: str) -> int:
         octave = int(note[-1])
@@ -64,6 +100,7 @@ class PPAnMidi:
         self._performance = None
         self._pianoroll = None
         self._note_array = None
+        return self
 
     @property
     def note_array(self):
@@ -73,10 +110,7 @@ class PPAnMidi:
 
     @property
     def duration(self):
-        note_offs = [
-            i['note_off'] for i in self.performance.performedparts[0].notes
-        ]
-        return max(note_offs)
+        return max(self.get_all_offsets())
 
     @property
     def performance(self) -> Performance:
@@ -100,6 +134,52 @@ class PPAnMidi:
                 ).toarray().astype(bool)
         return self._pianoroll
 
+    def generate_filelist_labs(self, name, lab, pad: float) -> str:
+        threshold_mask = self.oo_array.max(0) > 0.001
+        non_zero = np.where(threshold_mask)[0]
+        zero = np.where(~threshold_mask)[0]
+        res_list_pos = self._segment(name, lab, non_zero)
+        res_list_neg = self._segment(name, lab, zero)
+        total_time_pos = sum([j-i for _, _, i, j in res_list_pos])
+        res_list_neg = self._rebalance(total_time_pos*self.percentage_negative,
+                                       res_list_neg)
+
+        final_list = res_list_neg + res_list_pos
+        final_list = [
+            (filename, lab, max(start-pad, 0),
+             min(end+pad, self.oo_array.shape[1]*self.temporal_res)) for
+            filename, lab, start, end in final_list
+        ]
+        return "\n".join([" ".join([str(j) for j in i]) for i in final_list])
+
+    @staticmethod
+    def _rebalance(max_time: float, old_list: list) -> list:
+        new_list = []
+        total_time = 0
+        while total_time < max_time:
+            new_element = choice(
+                [i for i in old_list if i not in new_list]
+            )
+            total_time += new_element[3] - new_element[2]
+            new_list.append(new_element)
+
+        return new_list
+
+    def _segment(self, name, lab, mask):
+        non_zero_r = np.roll(mask, -1)
+        shift_array = np.where(non_zero_r - mask > 1)[0]
+        res_list = []
+        prev_idx = 0
+        for current_idx in shift_array:
+            time_start = mask[prev_idx] * self.temporal_res
+            time_end = mask[current_idx] * self.temporal_res
+            # Windows that aren't even a single frame are too small.
+            if time_start == time_end:
+                continue
+            res_list.append((name, lab, time_start, time_end))
+            prev_idx = current_idx+1
+        return res_list
+
     def pianoroll_window(self, timestamps: Tuple[float, float]):
         """
         Extract a window from the midi pianoroll given start and end times and
@@ -113,8 +193,8 @@ class PPAnMidi:
         -------
         pianoroll_window : npt.NDArray
         """
-        start = int(timestamps[0] / (1/self.time_div))
-        end = int(timestamps[1] / (1/self.time_div))
+        start = int(timestamps[0] / (1 / self.time_div))
+        end = int(timestamps[1] / (1 / self.time_div))
 
         return self.pianoroll[:, start:end]
 
@@ -136,38 +216,10 @@ class PPAnMidi:
             i['midi_pitch'] for i in self.performance[0].notes if
             timestamps[1] > i['note_on'] > timestamps[0] or
             i['note_on'] < timestamps[0] < i['note_off']
-        ])-self.piano_shift
+        ]) - self.piano_shift
         if any(notes > 87) or any(notes < 0):
             raise AttributeError("The note array seems to be invalid")
         return notes
-
-    def midi_to_onset_offset_vec(self,
-                      timestamps: Tuple[float, float]) -> npt.NDArray[int]:
-        """
-        Generate a pianoroll slice of all onsets and offsets played between two
-        timestamps. The first half of the vector corresponds to onsets, while
-        the second half corresponds to offsets.
-
-        Parameters
-        ----------
-        timestamps : Tuple[float, float]
-            start and end of the window in seconds
-
-        Returns
-        -------
-        note_vec : npt.NDArray
-        """
-        res_array = np.zeros(shape=128*2, dtype=np.single)
-        [
-            res_array.put(1, i['midi_pitch']-self.piano_shift) for i in self.performance[0].notes if
-            timestamps[1] > i['note_on'] > timestamps[0]
-        ]
-        [
-            res_array.put(1, i['midi_pitch']-self.piano_shift+self.PIANO_SHIFT) for i in
-            self.performance[0].notes if
-            timestamps[1] > i['note_off'] > timestamps[0]
-        ]
-        return res_array
 
     def notes_to_sentence(self, notes):
         """
@@ -206,50 +258,3 @@ class PPAnMidi:
         return np.squeeze(pianoroll)
 
 
-
-def extract_sentences(samples: list[Union[str, Path]],
-                      window_size: Optional[float] = None,
-                      stride: Optional[float] = None,
-                      start: int = None):
-    """
-    Go through a list of midi files and extract "sentences". Each sentence is
-    a list of notes within a generated window.
-    The next sentence starts at the next stride.
-
-    Parameters
-    ----------
-    samples : list[str]
-    window_size : Optional[float]
-        Size of the window in seconds. Defaults to 0.02
-    stride : Optional[float]
-        Distance between sentences in seconds. Defaults to 0.3.
-    start : int
-        Number to start at as file index.
-
-    Returns
-    -------
-    sentences : list[str]
-    """
-    if window_size is None:
-        window_size = 0.2
-    if stride is None:
-        stride = 0.9
-    if start is None:
-        start = 0
-
-    loader = PPAnMidi()
-    sentences = []
-    for sample_no, sample in enumerate(tqdm(samples,
-                                            desc="Extracting sentences "
-                                                 "from MIDI")):
-        try:
-            loader.set_midi(sample)
-            midi_duration = loader.duration
-        except:
-            continue
-
-        times = np.arange(0, midi_duration, stride)
-        for time in times:
-            sentence = loader.midi_to_notes((time, time+window_size))
-            sentences.append((sentence, str(sample_no+start)))
-    return sentences
