@@ -26,8 +26,8 @@ class PPAnMidi:
     NOTES_IN_OCTAVE = len(NOTES)
     PIANO_SHIFT = 21
 
-    def __init__(self, vid_len: float, temporal_res: float = None,
-                 lenience: int = None, percentage_negative: float = 0.05):
+    def __init__(self, vid_len: float, temporal_res: float,
+                 lenience: int, percentage_negative: float = 0.05):
 
         self.midi_filepath = None
         self._performance = None
@@ -54,8 +54,10 @@ class PPAnMidi:
                                  dtype=np.bool_)
             for note in self.performance.performedparts[0].notes:
                 note_on_frame = int(note['note_on']//self.temporal_res)
-                _oo_array[note['midi_pitch']-self.PIANO_SHIFT,
-                          note_on_frame-self.lenience:note_on_frame+self.lenience] = 1
+                _oo_array[
+                    note['midi_pitch']-self.PIANO_SHIFT,
+                    note_on_frame-self.lenience:note_on_frame+self.lenience+1
+                ] = 1
             self._oo_array = _oo_array
 
         return self._oo_array
@@ -100,6 +102,7 @@ class PPAnMidi:
         self._performance = None
         self._pianoroll = None
         self._note_array = None
+        self._oo_array = None
         return self
 
     @property
@@ -250,11 +253,3 @@ class PPAnMidi:
         for i in notes:
             note_array[i, :] = 1
         return note_array
-
-    def sentences_to_pianoroll(self, sentences: list[list]):
-        pianoroll = np.array([self.sentence_to_note_vec(i) for i in sentences],
-                             dtype=bool)
-        pianoroll = pianoroll.T
-        return np.squeeze(pianoroll)
-
-

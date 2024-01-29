@@ -1,13 +1,14 @@
 import argparse as ap
 
-from ppan import train, evaluate_model
+from ppan.train import main as train
+from ppan.evaluate_model import main as evaluate_model
 
 
 def main():
     parser = ap.ArgumentParser(
         prog="ppan",
-        description="A model for analyzing piano playing videos and extracting "
-                    "what notes are being played.",
+        description="A model for analyzing piano playing videos and "
+                    "extracting what notes are being played.",
         epilog="Coded with love by Uros Zivanovic"
     )
     subparsers = parser.add_subparsers(required=True)
@@ -44,7 +45,7 @@ def main():
         required=False,
         default=None
     )
-    parser_train.set_defaults(func=train.main)
+    parser_train.set_defaults(func=train)
 
     parser_eval = subparsers.add_parser("evaluate",
                                         help="Run inference using a trained "
@@ -70,7 +71,7 @@ def main():
              "with .pkl at the end.",
         required=True,
     )
-    parser_eval.set_defaults(func=evaluate_model.main)
+    parser_eval.set_defaults(func=evaluate_model)
 
     args = parser.parse_args()
     args.func(**vars(args))

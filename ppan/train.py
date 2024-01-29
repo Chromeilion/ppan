@@ -8,7 +8,7 @@ from transformers import (
 )
 
 from ppan.config import seed, pretrained_model, num_labels
-from ppan.dataset import load_rach3, ImageVecDataset
+from ppan.dataset import load_rach3, PPAnTrainDataset
 from ppan.stats import WandbPredictionProgressCallback
 from ppan.trainer import PPAnTrainer
 from ppan.types import PathLike
@@ -49,12 +49,12 @@ def train_image(dataset_dir: list[PathLike], output_dir: PathLike,
 
     # TODO: Dont hardcode hyperparamaters
     """Dataset Config"""
-    no_epochs = 2
+    no_epochs = 1
     eval_every = 200
     save_every = 500
     batch_size = 2
     max_iters_per_epoch_test = 50
-    max_iters_per_epoch_train = 4000
+    max_iters_per_epoch_train = None #4000
     class_weights = None
 
     """Optimizer Config"""
@@ -70,7 +70,7 @@ def train_image(dataset_dir: list[PathLike], output_dir: PathLike,
     processor = VideoMAEImageProcessor.from_pretrained(
         pretrained_model,
     )
-    train = ImageVecDataset(
+    train = PPAnTrainDataset(
         datasets=[train],
         video_transform=processor,
         batch_size=batch_size,
@@ -78,7 +78,7 @@ def train_image(dataset_dir: list[PathLike], output_dir: PathLike,
         cachefile_name="./train_cache.txt",
         max_iters_per_epoch=max_iters_per_epoch_train
     )
-    test = ImageVecDataset(
+    test = PPAnTrainDataset(
         datasets=[test],
         video_transform=processor,
         epoch_size=1,
@@ -115,7 +115,7 @@ def train_image(dataset_dir: list[PathLike], output_dir: PathLike,
         report_to=["wandb"]
     )
     trainer = PPAnTrainer(
-        weight=None,
+        weight=class_weights,
         model=model,
         args=training_arguments,
         train_dataset=train,

@@ -7,13 +7,17 @@ from torchvision import disable_beta_transforms_warning
 device = device("cuda" if cuda.is_available() else "cpu")
 
 # Let's try to have some reproducibility
-seed = 45
+seed = 42
 manual_seed(seed)
 random.seed(seed)
 np.random.seed(seed)
 
-# The number of keys on a piano, times two for onsets and offsets:
+# The number of keys on a (regular) piano
 num_labels = 88
+
+# The fps of all videos we're working with
+fps = 30
+temporal_res = 1/fps
 
 # Remove annoying warnings
 disable_beta_transforms_warning()

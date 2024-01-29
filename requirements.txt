@@ -20,3 +20,4 @@ av
 moviepy
 imageio
 plotly
+mir_eval

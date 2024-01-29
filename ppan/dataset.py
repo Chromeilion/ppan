@@ -74,6 +74,7 @@ class BaseDataset(IterableDataset):
         if cachefile_name is None:
             cachefile_name = "./ppan_cache.txt"
 
+        self.lenience = 1
         self.max_iters_per_epoch = max_iters_per_epoch
         self.cachefile_name = cachefile_name
         self.step = step
@@ -140,6 +141,10 @@ class BaseDataset(IterableDataset):
     def finish_processing(self, vals):
         ...
 
+    @abstractmethod
+    def get_video_reader(self, dataset_idx) -> fn.readers.video:
+        ...
+
     def get_midi(self, dataset_idx, sample_idx) -> PPAnMidi:
         """Get the PPaNMidi object for a sample. All objects are
         automatically cached for future use.
@@ -149,7 +154,8 @@ class BaseDataset(IterableDataset):
             vid_len = MultimediaTools().ff_probe(sample[2])
             vid_len = float(vid_len["streams"][0]["duration"])
             midi_path = sample[0]
-            midi = PPAnMidi(temporal_res=self.temporal_res, lenience=1,
+            midi = PPAnMidi(temporal_res=self.temporal_res,
+                            lenience=self.lenience,
                             vid_len=vid_len)
             midi.set_midi(midi_path)
             self.midi_cache[dataset_idx][sample_idx] = midi
@@ -173,6 +179,8 @@ class BaseDataset(IterableDataset):
             video, bbx[0, 0], bbx[0, 1], bbx[0, 2], bbx[0, 3])
 
     def midi_pipe_pytorch(self, label, dataset_idx, timestamps):
+        """Load labels from the correct MIDI file.
+        """
         midi = self.get_midi(dataset_idx.item(), label[0].item())
         # If the number of frames is even, we take the average between
         # the two middle frames. This means if one is positive and one
@@ -235,13 +243,23 @@ class BaseDataset(IterableDataset):
             )
         return "\n".join(file_list)
 
-    @abstractmethod
     @pipeline_def
     def video_pipe(self, dataset_idx: int):
-        ...
+        video, label, timestamps = self.get_video_reader(dataset_idx)
+        video = fn.transpose(video, perm=[0, 3, 1, 2])
+        video = pfn.torch_python_function(
+            video, label, dataset_idx,
+            function=self.video_pipe_pytorch
+        )
+        note_vec = pfn.torch_python_function(
+            label, dataset_idx,
+            timestamps,
+            function=self.midi_pipe_pytorch
+        )
+        return video, label, note_vec, timestamps, dataset_idx
 
 
-class ImageVecDataset(BaseDataset):
+class PPAnTrainDataset(BaseDataset):
     """
     Dataset object for training on a video/midi dataset such as Rach3.
     Handles loading, preprocessing, and batching all necessary files.
@@ -250,9 +268,8 @@ class ImageVecDataset(BaseDataset):
         return {'pixel_values': vals['pixel_values'],
                 'labels': vals['note_vec']}
 
-    @pipeline_def
-    def video_pipe(self, dataset_idx: int):
-        video, label, timestamps = fn.readers.video(
+    def get_video_reader(self, dataset_idx) -> fn.readers.video:
+        return fn.readers.video(
             device="gpu",
             file_list=self.file_list(dataset_idx),
             enable_timestamps=True,
@@ -265,28 +282,40 @@ class ImageVecDataset(BaseDataset):
             step=self.step,
             file_list_include_preceding_frame=True
         )
-        video = fn.transpose(video, perm=[0, 3, 1, 2])
-        video = pfn.torch_python_function(
-            video, label,
-            dataset_idx,
-            function=self.video_pipe_pytorch
-        )
-        note_vec = pfn.torch_python_function(
-            label, dataset_idx,
-            timestamps,
-            function=self.midi_pipe_pytorch
-        )
-        return video, label, note_vec, timestamps, dataset_idx
 
 
-class EvalDataset(BaseDataset):
+class PPAnEvalDataset(BaseDataset):
     """
     For evaluating on a video/midi dataset. Loads clips sequentially and
     returns the timestamp.
     """
     def finish_processing(self, vals):
         return {'pixel_values': vals['pixel_values'],
-                'labels': vals['note_vec']}
+                'labels': vals['note_vec'],
+                'timestamps': vals['timestamps'],
+                'dataset_idx': vals['dataset_idx'],
+                'file_idx': vals['label']}
+
+    def get_all_video_samples(self):
+        all_vids = []
+        [[all_vids.append(str(i[2])) for i in j] for j in self.datasets]
+        return all_vids
+
+    def get_video_reader(self, dataset_idx) -> fn.readers.video:
+        return fn.readers.video(
+            device="gpu",
+            filenames=self.get_all_video_samples(),
+            labels=[],
+            enable_timestamps=True,
+            sequence_length=self.no_frames_per_clip,
+            shard_id=0,
+            num_shards=1,
+            random_shuffle=False,
+            initial_fill=2,
+            name="VideoReader",
+            step=self.step,
+            file_list_include_preceding_frame=True
+        )
 
 
 def load_rach3(root: PathLike):
