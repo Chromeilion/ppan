@@ -15,6 +15,7 @@
             <excludedPath local="true" path="$PROJECT_DIR$/wandb" />
             <excludedPath local="true" path="$PROJECT_DIR$/eval.pkl" />
             <excludedPath local="true" path="$PROJECT_DIR$/ppan.egg-info" />
+            <excludedPath local="true" path="$PROJECT_DIR$/midi_preds" />
           </excludedPaths>
         </serverdata>
       </paths>

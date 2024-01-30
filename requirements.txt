@@ -1,6 +1,6 @@
 Cython
 numpy
-scipy
+scipy==1.12.0
 mido
 git+https://github.com/neosatrapahereje/rach3datautils@main#egg=rach3datautils
 opencv-python
@@ -10,7 +10,7 @@ tensorboard
 partitura
 timm
 kornia
-transformers[torch]
+transformers[torch]==4.37.2
 matplotlib
 scikit-learn
 pandas

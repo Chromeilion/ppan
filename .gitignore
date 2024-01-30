@@ -240,3 +240,10 @@ runs/
 checkpoints/
 
 idea/
+
+eval.pkl
+mir_stats.json
+ppan_cache.txt
+test_cache.txt
+train_cache.txt
+midi_preds/
