@@ -12,10 +12,21 @@ authors = [
     {name = "Uros Zivanovic", email = "uki@cro.moe"}
 ]
 dependencies = [
-    'rach3datautils @ git+https://github.com/neosatrapahereje/rach3datautils.git',
-    'torch', 'torchvision', 'torchaudio', 'partitura', 'tqdm',
-    'tokenizers', 'mido', 'numpy', 'scipy', 'opencv-python', 'transformers[torch]',
-    'scikit-learn', 'pandas', 'datasets'
+    "Cython",
+    "numpy",
+    "mido",
+    "git+https://github.com/neosatrapahereje/rach3datautils@main#egg=rach3datautils",
+    "tqdm",
+    "partitura",
+    "transformers[torch]",
+    "matplotlib",
+    "torchvision",
+    "mir_eval",
+    "python-dotenv",
+    "torch",
+    "pillow",
+    "nvidia-dali-cuda120",
+    "wandb"
 ]
 
 [project.urls]
