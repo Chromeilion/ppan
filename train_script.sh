@@ -27,6 +27,7 @@ if [ ! -f "$ACCELERATE_CONFIG_LOC" ]; then
 fi
 
 source ./venv/bin/activate
+pip install cython
 pip install -r requirements.txt
 pip install .
 accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" ./ppan/__main__.py

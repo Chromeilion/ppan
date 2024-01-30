@@ -1,9 +1,9 @@
 import json
 import pickle
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
-import warnings
 
 import mir_eval
 import numpy as np

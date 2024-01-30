@@ -5,7 +5,6 @@ from abc import abstractmethod
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable
-import random
 
 import nvidia.dali.fn as fn
 import nvidia.dali.plugin.pytorch.fn as pfn
@@ -128,7 +127,6 @@ class BaseDataset(IterableDataset):
     def __iter__(self) -> dict[str, torch.Tensor]:
         for _ in range(self.epoch_size):
             for iter_no, [vals] in enumerate(self.dali_iter):
-                self.plot_image(torch.squeeze(vals['pixel_values'][0, 0, ...]))
                 vals['pixel_values'] = self.augment(vals['pixel_values'])
                 yield self.finish_processing(vals)
                 if self.max_iters_per_epoch is not None:

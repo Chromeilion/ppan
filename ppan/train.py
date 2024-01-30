@@ -1,7 +1,7 @@
+from os import environ
 from typing import Optional
 
 from dotenv import load_dotenv
-from os import environ
 from transformers import (
     VideoMAEImageProcessor,
     VideoMAEForVideoClassification,
@@ -15,7 +15,7 @@ from ppan.trainer import PPAnTrainer
 from ppan.types import PathLike
 
 
-def train(dataset_dir: list[PathLike],
+def train(dataset_dir: PathLike,
           output_dir: PathLike,
           no_epochs: Optional[int],
           eval_every: Optional[int],
@@ -53,7 +53,7 @@ def train(dataset_dir: list[PathLike],
     no_gpu = environ.get("PPAN_NO_GPU", 1)
     lr = (learning_rate * batch_size * no_gpu) / 256.
 
-    test_samples, train_samples = load_rach3(dataset_dir[0])
+    test_samples, train_samples = load_rach3(dataset_dir)
 
     processor = VideoMAEImageProcessor.from_pretrained(
         pretrained_model,
