@@ -30,7 +30,7 @@ source ./venv/bin/activate
 pip install cython
 pip install -r requirements.txt
 pip install .
-accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" ./ppan/__main__.py
+accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" ./ppan/__main__.py train
 
 # Clean up the virtualenv after we're done
 rm -r ./venv
