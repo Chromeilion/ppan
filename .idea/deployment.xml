@@ -5,7 +5,7 @@
       <paths name="uzivanovic@195.14.102.215:22 key">
         <serverdata>
           <mappings>
-            <mapping deploy="/u/dssc/uzivanovic/projects/ppan" local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/projects/ppan" local="$PROJECT_DIR$" web="/" />
           </mappings>
           <excludedPaths>
             <excludedPath local="true" path="$PROJECT_DIR$/test_cache.txt" />
