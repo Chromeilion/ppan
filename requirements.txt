@@ -21,3 +21,4 @@ moviepy
 imageio
 plotly
 mir_eval
+python-dotenv

@@ -1,6 +1,7 @@
-import os
 from typing import Optional
 
+from dotenv import load_dotenv
+from os import environ
 from transformers import (
     VideoMAEImageProcessor,
     VideoMAEForVideoClassification,
@@ -14,72 +15,59 @@ from ppan.trainer import PPAnTrainer
 from ppan.types import PathLike
 
 
-def main(dataset_dir: list[PathLike],
-         output_dir: PathLike,
-         checkpoint_dir: Optional[PathLike],
-         *_, **__):
-    """
-    Training function for PPAn.
+def train(dataset_dir: list[PathLike],
+          output_dir: PathLike,
+          no_epochs: Optional[int],
+          eval_every: Optional[int],
+          save_every: Optional[int],
+          batch_size: Optional[int],
+          max_iters_per_epoch_test: Optional[int],
+          max_iters_per_epoch_train: Optional[int],
+          class_weights: Optional[float],
+          learning_rate: Optional[float],
+          weight_decay: Optional[float],
+          warmup_ratio: Optional[float],
+          scheduler_type: Optional[str],
+          checkpoint_dir: Optional[PathLike] = None,
+          *_, **__):
+    if dataset_dir is None:
+        raise AttributeError("The dataset directory is required for "
+                             "model training.")
+    if output_dir is None:
+        raise AttributeError("The output directory is required for "
+                             "model training.")
+    if no_epochs is None:
+        no_epochs = 1
+    if batch_size is None:
+        batch_size = 8
+    if learning_rate is None:
+        learning_rate = 1e-3
+    if weight_decay is None:
+        weight_decay = 0.05
+    if warmup_ratio is None:
+        warmup_ratio = 0.1
+    if scheduler_type is None:
+        scheduler_type = "cosine"
 
-    Parameters
-    ----------
-    checkpoint_dir : Optional[PathLike]
-        Checkpoint directory from which to resume training.
-    dataset_dir : PathLike
-        Directory with train and test set in their own folders.
-    output_dir : PathLike
-        Where to output training results.
+    load_dotenv()
+    no_gpu = environ.get("PPAN_NO_GPU", 1)
+    lr = (learning_rate * batch_size * no_gpu) / 256.
 
-    Returns
-    -------
-    None
-    """
-    if checkpoint_dir:
-        checkpoint_dir = checkpoint_dir[0]
-    train_image(dataset_dir=dataset_dir,
-                output_dir=output_dir[0],
-                checkpoint_dir=checkpoint_dir)
-
-
-def train_image(dataset_dir: list[PathLike], output_dir: PathLike,
-                checkpoint_dir: Optional[PathLike] = None):
-    # Wandb logging settings
-    os.environ["WANDB_PROJECT"] = "rach3-detector"
-    os.environ["WANDB_LOG_MODEL"] = "checkpoint"
-
-    # TODO: Dont hardcode hyperparamaters
-    """Dataset Config"""
-    no_epochs = 1
-    eval_every = 200
-    save_every = 500
-    batch_size = 2
-    max_iters_per_epoch_test = 50
-    max_iters_per_epoch_train = None #4000
-    class_weights = None
-
-    """Optimizer Config"""
-    lr = 1e-3 * batch_size / 256
-    weight_decay = 0.05
-
-    """Scheduler Config"""
-    warmup_ratio = 0.1
-    scheduler_type = "cosine"
-
-    test, train = load_rach3(dataset_dir[0])
+    test_samples, train_samples = load_rach3(dataset_dir[0])
 
     processor = VideoMAEImageProcessor.from_pretrained(
         pretrained_model,
     )
-    train = PPAnTrainDataset(
-        datasets=[train],
+    train_ds = PPAnTrainDataset(
+        datasets=[train_samples],
         video_transform=processor,
         batch_size=batch_size,
         epoch_size=no_epochs,
         cachefile_name="./train_cache.txt",
         max_iters_per_epoch=max_iters_per_epoch_train
     )
-    test = PPAnTrainDataset(
-        datasets=[test],
+    test_ds = PPAnTrainDataset(
+        datasets=[test_samples],
         video_transform=processor,
         epoch_size=1,
         batch_size=batch_size,
@@ -118,14 +106,14 @@ def train_image(dataset_dir: list[PathLike], output_dir: PathLike,
         weight=class_weights,
         model=model,
         args=training_arguments,
-        train_dataset=train,
-        eval_dataset=test,
+        train_dataset=train_ds,
+        eval_dataset=test_ds,
         data_collator=lambda x: x[0]
     )
     # Instantiate the WandbPredictionProgressCallback
     progress_callback = WandbPredictionProgressCallback(
         trainer=trainer,
-        val_dataset=test
+        val_dataset=test_ds
     )
     # Add the callback to the trainer
     trainer.add_callback(progress_callback)

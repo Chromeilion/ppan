@@ -1,7 +1,8 @@
+from typing import Optional
+
 from torch import nn
 from torch import tensor
 from transformers import Trainer
-from typing import Optional
 
 
 class PPAnTrainer(Trainer):

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" remoteFilesAllowedToDisappearOnAutoupload="false">
+    <serverData>
+      <paths name="uzivanovic@195.14.102.215:22 key">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/u/dssc/uzivanovic/projects/ppan" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/test_cache.txt" />
+            <excludedPath local="true" path="$PROJECT_DIR$/train_cache.txt" />
+            <excludedPath local="true" path="$PROJECT_DIR$/ppan_cache.txt" />
+            <excludedPath local="true" path="$PROJECT_DIR$/mir_stats.json" />
+            <excludedPath local="true" path="$PROJECT_DIR$/wandb" />
+            <excludedPath local="true" path="$PROJECT_DIR$/eval.pkl" />
+            <excludedPath local="true" path="$PROJECT_DIR$/ppan.egg-info" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+    </serverData>
+  </component>
+</project>

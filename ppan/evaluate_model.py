@@ -1,17 +1,18 @@
-import numpy as np
-import pickle
 import json
-
-from rach3datautils.utils.multimedia import MultimediaTools
-from partitura.utils import pianoroll_to_notearray
-from partitura.performance import PerformedPart, Performance
-from partitura import save_performance_midi
-from pathlib import Path
+import pickle
 from collections import defaultdict
-import mir_eval
+from pathlib import Path
+from typing import Optional
+import warnings
 
-from torch import no_grad
+import mir_eval
+import numpy as np
 import torch.nn as nn
+from partitura import save_performance_midi
+from partitura.performance import PerformedPart, Performance
+from partitura.utils import pianoroll_to_notearray
+from rach3datautils.utils.multimedia import MultimediaTools
+from torch import no_grad
 from tqdm import tqdm
 from transformers import (
     VideoMAEForVideoClassification,
@@ -24,41 +25,31 @@ from ppan.midi import PPAnMidi
 from ppan.types import PathLike
 
 
-def main(dataset_dir: list[PathLike],
-         output: PathLike,
-         model_checkpoint: PathLike,
-         *_, **__):
-    """
-    Evaluation function for PPAn. Takes a trained model and runs it through a
-    series of videos. Then it computes the loss between the generated note
-    array and target note array.
-
-    Parameters
-    ----------
-    dataset_dir : list[PathLike]
-        Directory with train and test set in their own folders.
-    output : PathLike
-        Where to output results (on tensorboard)
-    model_checkpoint : PathLike
-        Location of pretrained PPAn model.
-
-    Returns
-    -------
-    None
-    """
-    evaluate(dataset_dir=dataset_dir,
-             output=output[0],
-             model_checkpoint=model_checkpoint[0])
-
-
-def evaluate(dataset_dir: list[PathLike], output: PathLike,
-             model_checkpoint: PathLike):
-    threshold = 0.83
-
-    test, _ = load_rach3(dataset_dir[0])
-
-    if not Path(output).exists():
+def evaluate(dataset_dir: PathLike,
+             preds_output: PathLike,
+             model_checkpoint: PathLike,
+             midi_output: Optional[PathLike] = None,
+             threshold: Optional[float] = None,
+             batch_size: Optional[int] = None,
+             *_, **__):
+    if dataset_dir is None:
+        raise AttributeError("The dataset directory is required to run "
+                             "evaluation.")
+    if preds_output is None:
+        raise AttributeError("A path to the output file is required.")
+    if model_checkpoint is None:
+        warnings.warn("No model checkpoint passed. This is not an issue if "
+                      "the model predictions have already been calculated and "
+                      "the correct path to these predictions is passed in "
+                      "preds_output.")
+    if threshold is None:
+        threshold = 0.83
+    if batch_size is None:
         batch_size = 20
+
+    test, _ = load_rach3(dataset_dir)
+
+    if not Path(preds_output).exists():
         model = VideoMAEForVideoClassification.from_pretrained(
             model_checkpoint
         ).eval().to(device)
@@ -73,29 +64,34 @@ def evaluate(dataset_dir: list[PathLike], output: PathLike,
         with no_grad():
             preds_rach3 = eval_loop(dataset=dataset, model=model)
 
-        with open(output, "wb") as f:
+        with open(preds_output, "wb") as f:
             pickle.dump(obj=preds_rach3, file=f)
     else:
-        with open(output, "rb") as f:
+        with open(preds_output, "rb") as f:
             preds_rach3 = pickle.load(f)
 
     for vid_path, preds in preds_rach3.items():
         final_pred = threshold_and_calc_time(preds, threshold)
-        times = np.array([i[0] for i in final_pred])
         onset_array = final_pred_to_onset_array(final_pred)
-
+        onset_array = onset_array.astype(int) * 100
         session_files = [i for i in test if vid_path in str(i[2])][0]
         vid_len = MultimediaTools().ff_probe(session_files[2])
         vid_len = float(vid_len["streams"][0]["duration"])
-        midi = PPAnMidi(vid_len, temporal_res, 0).set_midi(session_files[0])
+        midi = PPAnMidi(vid_len, temporal_res, 0)
+        midi.set_midi(session_files[0])
         mir_stats = calc_stats(
             midi=midi,
             onset_array=onset_array
         )
-        with open("./mir_stats", "w") as f:
+        with open("./mir_stats.json", "w") as f:
             json.dump(mir_stats, f)
 
-        save_to_midi(onset_array, "midi_preds.mid")
+        if midi_output is not None:
+            vid_path = Path(vid_path)
+            midi_output = Path(midi_output)
+            midi_output.mkdir(exist_ok=True)
+            mid_output = midi_output/(vid_path.stem + ".mid")
+            save_to_midi(onset_array, str(mid_output))
 
 
 def final_pred_to_onset_array(final_pred) -> np.ndarray:
@@ -138,8 +134,7 @@ def eval_loop(dataset, model):
     preds_dict = defaultdict(list)
     sig = nn.Sigmoid()
     for i in tqdm(dataset):
-#        preds = sig(model(i['pixel_values']))
-        preds = i['labels']
+        preds = sig(model(i['pixel_values']))
         all_files = dataset.get_all_video_samples()
         for timestamps, file_idx, pred in zip(i['timestamps'], i['file_idx'],
                                               preds):
@@ -159,7 +154,7 @@ def save_to_midi(onset_array, name: str):
             note_array=note_array
         )
     )
-    save_performance_midi(performance_data=performance, out=f"./midis/{name}")
+    save_performance_midi(performance_data=performance, out=name)
 
 
 def perf_to_int_pitch(perf):
@@ -178,7 +173,7 @@ def calc_perf_eval(pred_perf, true_perf):
     # This line is necessary because the model labels are actually
     # calculated between two frames, therefore, to align the predictions
     # properly, we need to shift everything half a frame.
-    est_intervals += temporal_res / 2
+    est_intervals += temporal_res / 2.
     ref_intervals, ref_pitches = perf_to_int_pitch(true_perf)
 
     return mir_eval.transcription.precision_recall_f1_overlap(
@@ -217,11 +212,12 @@ def threshold_and_calc_time(preds, threshold):
             time += times[middle+1]
             time = time / 2.
         final_preds.append((time, vals))
-    # Because the windows dont start at time zero, we need to insert a few
+    # Because the windows don't start at time zero, we need to insert a few
     # frames at the start of the preds so that they start at zero.
     no_to_insert = int(final_preds[0][0] / (1./30.))
     [final_preds.insert(
         0,
-        (temporal_res*i, np.zeros(shape=final_preds[0][1].shape, dtype=np.bool_)))
+        (temporal_res*i, np.zeros(shape=final_preds[0][1].shape,
+                                  dtype=np.bool_)))
         for i in reversed(range(no_to_insert))]
     return final_preds

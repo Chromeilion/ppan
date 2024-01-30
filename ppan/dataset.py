@@ -5,6 +5,7 @@ from abc import abstractmethod
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable
+import random
 
 import nvidia.dali.fn as fn
 import nvidia.dali.plugin.pytorch.fn as pfn
@@ -102,7 +103,6 @@ class BaseDataset(IterableDataset):
                                  std=self.video_transform.image_std)
                 )
         self.augment = v2.Compose(augmentations)
-
         self.pipes = [
             self.video_pipe(
                 batch_size=batch_size, num_threads=2,
@@ -128,7 +128,7 @@ class BaseDataset(IterableDataset):
     def __iter__(self) -> dict[str, torch.Tensor]:
         for _ in range(self.epoch_size):
             for iter_no, [vals] in enumerate(self.dali_iter):
-                vals['pixel_values'] = vals['pixel_values']
+                self.plot_image(torch.squeeze(vals['pixel_values'][0, 0, ...]))
                 vals['pixel_values'] = self.augment(vals['pixel_values'])
                 yield self.finish_processing(vals)
                 if self.max_iters_per_epoch is not None:
@@ -166,9 +166,10 @@ class BaseDataset(IterableDataset):
     def plot_image(img_tensor: torch.Tensor):
         """Plot a tensor image."""
         import matplotlib.pyplot as plt
-        img_tensor_np = torch.swapaxes(img_tensor.detach().cpu(), 0, 2)
+        img_tensor = torch.swapaxes(img_tensor, 0, 2)
+        img = img_tensor.detach().cpu()
         plt.figure()
-        plt.imshow(img_tensor_np)
+        plt.imshow(img)
         plt.show()
 
     @staticmethod
@@ -211,7 +212,9 @@ class BaseDataset(IterableDataset):
         return notes_vec
 
     def video_pipe_pytorch(self, video, label, dataset_idx):
-        crop = self.datasets[dataset_idx][label][-1]
+        crop = torch.tensor(self.datasets[dataset_idx][label][-1])
+        # Randomly resize the crop as an augmentation
+        crop += torch.randint(20, 60, [4]) * torch.tensor([-1, 1, -1, 1])
         box = tv_tensors.BoundingBoxes(
             torch.tensor([crop[0], crop[2], crop[1], crop[3]]),
             format=tv_tensors.BoundingBoxFormat("XYXY"),
