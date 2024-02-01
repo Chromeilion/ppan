@@ -1,5 +1,6 @@
-from os import environ
-from typing import Optional
+import os
+from typing import Optional, Union
+from pathlib import Path
 
 from dotenv import load_dotenv
 from transformers import (
@@ -10,9 +11,11 @@ from transformers import (
 
 from ppan.config import seed, pretrained_model, num_labels
 from ppan.dataset import load_rach3, PPAnTrainDataset
-from ppan.stats import WandbPredictionProgressCallback
+from ppan.trainer_callbacks import (WandbPredictionProgressCallback,
+                                    SaveCallback)
 from ppan.trainer import PPAnTrainer
-from ppan.types import PathLike
+
+PathLike = Union[str, bytes, os.PathLike]
 
 
 def train(dataset_dir: PathLike,
@@ -48,9 +51,13 @@ def train(dataset_dir: PathLike,
         warmup_ratio = 0.1
     if scheduler_type is None:
         scheduler_type = "cosine"
+    dataset_checkpoint = None
+    if checkpoint_dir is not None:
+        dataset_checkpoint = (Path(checkpoint_dir) /
+                              SaveCallback.DATASET_SAVE_NAME)
 
     load_dotenv()
-    no_gpu = environ.get("PPAN_NO_GPU", 1)
+    no_gpu = int(os.environ.get("PPAN_NO_GPU", 1))
     lr = (learning_rate * batch_size * no_gpu) / 256.
 
     test_samples, train_samples = load_rach3(dataset_dir)
@@ -64,7 +71,8 @@ def train(dataset_dir: PathLike,
         batch_size=batch_size,
         epoch_size=no_epochs,
         cachefile_name="./train_cache.txt",
-        max_iters_per_epoch=max_iters_per_epoch_train
+        max_iters_per_epoch=max_iters_per_epoch_train,
+        checkpoint_location=dataset_checkpoint
     )
     test_ds = PPAnTrainDataset(
         datasets=[test_samples],
@@ -115,6 +123,8 @@ def train(dataset_dir: PathLike,
         trainer=trainer,
         val_dataset=test_ds
     )
+    save_callback = SaveCallback()
     # Add the callback to the trainer
     trainer.add_callback(progress_callback)
+    trainer.add_callback(save_callback)
     trainer.train(resume_from_checkpoint=checkpoint_dir)

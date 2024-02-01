@@ -3,7 +3,8 @@ import pickle
 import warnings
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+import os
 
 import mir_eval
 import numpy as np
@@ -22,7 +23,8 @@ from transformers import (
 from ppan.config import device, pretrained_model, fps, temporal_res
 from ppan.dataset import load_rach3, PPAnEvalDataset
 from ppan.midi import PPAnMidi
-from ppan.types import PathLike
+
+PathLike = Union[str, bytes, os.PathLike]
 
 
 def evaluate(dataset_dir: PathLike,

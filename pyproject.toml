@@ -15,7 +15,7 @@ dependencies = [
     "Cython",
     "numpy",
     "mido",
-    "git+https://github.com/neosatrapahereje/rach3datautils@main#egg=rach3datautils",
+    "rach3datautils @ git+https://github.com/neosatrapahereje/rach3datautils@main#egg=rach3datautils",
     "tqdm",
     "partitura",
     "transformers[torch]",
@@ -31,3 +31,7 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/Chromeilion/ppan"
+
+[tool.setuptools.packages.find]
+include = ["ppan"]
+

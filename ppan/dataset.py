@@ -1,12 +1,13 @@
 import csv
-import json
 import os
 from abc import abstractmethod
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Tuple, Optional, Callable
+from typing import List, Tuple, Optional, Callable, Union
+import json
 
 import nvidia.dali.fn as fn
+from nvidia.dali import Pipeline
 import nvidia.dali.plugin.pytorch.fn as pfn
 import torch
 import torchvision.transforms.functional as functional
@@ -21,7 +22,9 @@ from transformers import VideoMAEImageProcessor
 
 from ppan.config import seed
 from ppan.midi import PPAnMidi
-from ppan.types import PathLike
+
+
+PathLike = Union[str, bytes, os.PathLike]
 
 SAMPLE_TYPE = List[List[
     Tuple[PathLike, PathLike, PathLike, tuple[int, int, int, int]]]]
@@ -44,7 +47,8 @@ class BaseDataset(IterableDataset):
             dataset_max_framerate: Optional[int] = None,
             step: Optional[int] = None,
             cachefile_name: Optional[str] = None,
-            max_iters_per_epoch: Optional[int] = None
+            max_iters_per_epoch: Optional[int] = None,
+            checkpoint_location: Optional[PathLike] = None
     ):
         """
         Parameters
@@ -91,6 +95,9 @@ class BaseDataset(IterableDataset):
         self._file_list = None
         self.midi_cache = defaultdict(dict)
 
+        self.current_iteration = 0
+        self.target_size = None
+
         augmentations = [
             v2.UniformTemporalSubsample(self.temporal_res_frames),
             v2.ToDtype(torch.float, scale=True),
@@ -102,18 +109,16 @@ class BaseDataset(IterableDataset):
                                  std=self.video_transform.image_std)
                 )
         self.augment = v2.Compose(augmentations)
-        self.pipes = [
-            self.video_pipe(
-                batch_size=batch_size, num_threads=2,
-                device_id=0, seed=seed, dataset_idx=i
-            ) for i in range(len(self.datasets))
-        ]
-        self.dali_iter = DALIGenericIterator(
-            self.pipes,
-            ['pixel_values', 'label', 'note_vec',
-             'timestamps', 'dataset_idx'],
-            reader_name="VideoReader"
-        )
+        self.batch_size = batch_size
+
+        # Target iteration is used when restoring from a checkpoint in
+        # order to know where we were originally.
+        self.target_iteration: Optional[int] = None
+
+        if checkpoint_location is not None:
+            self.load(checkpoint_location)
+        else:
+            self.dali_iter = self.get_iter()
 
     def __call__(self, *args, **kwargs):
         return self.__iter__()
@@ -125,13 +130,34 @@ class BaseDataset(IterableDataset):
                                      self.max_iters_per_epoch)
 
     def __iter__(self) -> dict[str, torch.Tensor]:
-        for _ in range(self.epoch_size):
-            for iter_no, [vals] in enumerate(self.dali_iter):
-                vals['pixel_values'] = self.augment(vals['pixel_values'])
-                yield self.finish_processing(vals)
+        # As a workaround for the HuggingFace Trainer being unable to
+        # restore the state of the dataset, we pretend that we're iterating
+        # through all the samples again (when in reality the state was loaded
+        # outside the Trainer).
+        if self.target_iteration is not None:
+            placeholder_batch = {"pixel_values": torch.zeros((1, 1)),
+                                 "labels": torch.zeros((1, 1))}
+            while self.current_iteration < self.target_iteration:
+                self.current_iteration += 1
+                yield placeholder_batch
+
+        current_epoch = self.current_iteration // len(self)
+        iter_no = self.current_iteration - current_epoch * len(self)
+
+        for _ in range(self.epoch_size - current_epoch):
+            for vals in self.dali_iter:
+                for val in vals:
+                    val['pixel_values'] = self.augment(val['pixel_values'])
+                    yield self.finish_processing(val)
+                    iter_no += 1
+                    self.current_iteration += 1
+                    if self.max_iters_per_epoch is not None:
+                        if iter_no > self.max_iters_per_epoch:
+                            break
                 if self.max_iters_per_epoch is not None:
                     if iter_no > self.max_iters_per_epoch:
                         break
+            iter_no = 0
             # New epoch, we need to start from zero with the iterator
             self.dali_iter.reset()
 
@@ -140,8 +166,34 @@ class BaseDataset(IterableDataset):
         ...
 
     @abstractmethod
-    def get_video_reader(self, dataset_idx) -> fn.readers.video:
+    def get_video_reader(self, dataset_idx, num_gpus) -> fn.readers.video:
         ...
+
+    def get_iter(self, checkpoints: Optional[PathLike] = None):
+        n = int(os.environ.get("PPAN_NO_GPU", 1))
+        if checkpoints is not None:
+            pipes = [
+                self.video_pipe(
+                    batch_size=self.batch_size, num_threads=2,
+                    device_id=i, seed=seed, dataset_idx=0,
+                    num_gpus=n, checkpoint=checkpoints[i]
+                ) for i in range(n)
+            ]
+        else:
+            pipes = [
+                self.video_pipe(
+                    batch_size=self.batch_size, num_threads=2,
+                    device_id=i, seed=seed, dataset_idx=0,
+                    num_gpus=n
+                ) for i in range(n)
+            ]
+        dali_iter = DALIGenericIterator(
+            pipes,
+            ['pixel_values', 'label', 'note_vec',
+             'timestamps', 'dataset_idx'],
+            reader_name="VideoReader"
+        )
+        return dali_iter
 
     def get_midi(self, dataset_idx, sample_idx) -> PPAnMidi:
         """Get the PPaNMidi object for a sample. All objects are
@@ -244,9 +296,10 @@ class BaseDataset(IterableDataset):
             )
         return "\n".join(file_list)
 
-    @pipeline_def
-    def video_pipe(self, dataset_idx: int):
-        video, label, timestamps = self.get_video_reader(dataset_idx)
+    @pipeline_def(enable_checkpointing=True)
+    def video_pipe(self, dataset_idx: int, num_gpus: int):
+        video, label, timestamps = self.get_video_reader(dataset_idx,
+                                                         num_gpus)
         video = fn.transpose(video, perm=[0, 3, 1, 2])
         video = pfn.torch_python_function(
             video, label, dataset_idx,
@@ -259,6 +312,28 @@ class BaseDataset(IterableDataset):
         )
         return video, label, note_vec, timestamps, dataset_idx
 
+    def save(self, filepath: PathLike):
+        """
+        Save the state of the dataset.
+        """
+        checkpoints = {
+            "pipeline_states": [
+                i.decode("utf-8") for i in self.dali_iter.checkpoints()],
+            "current_iteration": self.current_iteration
+        }
+        with open(filepath, "w") as f:
+            json.dump(checkpoints, f)
+
+    def load(self, filepath: PathLike):
+        """
+        Load the state of the dataset from a checkpoint.
+        """
+        with open(filepath, "r") as f:
+            checkpoint = json.load(f)
+
+        self.dali_iter = self.get_iter(checkpoint["pipeline_states"])
+        self.target_iteration = checkpoint["current_iteration"]
+
 
 class PPAnTrainDataset(BaseDataset):
     """
@@ -269,19 +344,19 @@ class PPAnTrainDataset(BaseDataset):
         return {'pixel_values': vals['pixel_values'],
                 'labels': vals['note_vec']}
 
-    def get_video_reader(self, dataset_idx) -> fn.readers.video:
+    def get_video_reader(self, dataset_idx, num_gpus) -> fn.readers.video:
         return fn.readers.video(
             device="gpu",
             file_list=self.file_list(dataset_idx),
             enable_timestamps=True,
             sequence_length=self.no_frames_per_clip,
-            shard_id=0,
-            num_shards=1,
+            shard_id=Pipeline.current().device_id,
             random_shuffle=True,
             initial_fill=2,
             name="VideoReader",
             step=self.step,
-            file_list_include_preceding_frame=True
+            file_list_include_preceding_frame=True,
+            num_shards=num_gpus
         )
 
 
@@ -302,20 +377,20 @@ class PPAnEvalDataset(BaseDataset):
         [[all_vids.append(str(i[2])) for i in j] for j in self.datasets]
         return all_vids
 
-    def get_video_reader(self, dataset_idx) -> fn.readers.video:
+    def get_video_reader(self, dataset_idx, num_gpus) -> fn.readers.video:
         return fn.readers.video(
             device="gpu",
             filenames=self.get_all_video_samples(),
             labels=[],
             enable_timestamps=True,
             sequence_length=self.no_frames_per_clip,
-            shard_id=0,
-            num_shards=1,
+            shard_id=Pipeline.current().device_id,
+            num_shards=num_gpus,
             random_shuffle=False,
             initial_fill=2,
             name="VideoReader",
             step=self.step,
-            file_list_include_preceding_frame=True
+            file_list_include_preceding_frame=True,
         )
 
 

@@ -44,8 +44,8 @@ def main():
         "-r", "--checkpoint-dir",
         action="store",
         help="Location of a training checkpoint when continuing training.",
+        default=os.environ.get("PPAN_MODEL_CHECKPOINT", None),
         required=False,
-        default=None
     )
     parser_train.add_argument(
         "--no-epochs",

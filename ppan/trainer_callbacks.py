@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import torch
 import torchvision.transforms.v2 as v2
 import wandb
-from transformers import Trainer
+from transformers import (Trainer, TrainerCallback, TrainingArguments,
+                          TrainerState, TrainerControl)
 from transformers.integrations import WandbCallback
 
 from ppan.config import num_labels
@@ -33,13 +36,18 @@ class WandbPredictionProgressCallback(WandbCallback):
         super().__init__()
         self.trainer: Trainer = trainer
         iterator = iter(val_dataset)
+        iterator_zero = next(iterator)
         self.sample_dataset = [next(iterator) for _ in range(num_samples)]
+        # move all samples to the same gpu
+        self.sample_dataset = [
+            {key: val.to(iterator_zero[key].device)
+             for key, val in i.items()} for i in self.sample_dataset]
         img_mean = torch.tensor(val_dataset.video_transform.image_mean)
         img_std = torch.tensor(val_dataset.video_transform.image_std)
         self.unnormalize = v2.Compose([
             v2.Normalize(
-                mean=-img_mean/img_std,
-                std=1/img_std
+                mean=-img_mean / img_std,
+                std=1 / img_std
             ),
             v2.ToDtype(torch.uint8, scale=True)
         ])
@@ -58,9 +66,9 @@ class WandbPredictionProgressCallback(WandbCallback):
     def add_preds_image(self, logits: torch.Tensor, target: torch.Tensor,
                         lab: str, step: int):
         img_t = v2.functional.resize(target[None, :, None],
-                                     [num_labels, num_labels//2])
+                                     [num_labels, num_labels // 2])
         img_p = v2.functional.resize(logits[None, :, None],
-                                     [num_labels, num_labels//2])
+                                     [num_labels, num_labels // 2])
         img_f = torch.cat((img_t, img_p), dim=2)
         self._wandb.log(
             {lab: wandb.Image(img_f)},
@@ -78,7 +86,7 @@ class WandbPredictionProgressCallback(WandbCallback):
             )
             self.videos_run = True
 
-        if state.global_step % state.eval_steps*self.freq == 0:
+        if state.global_step % state.eval_steps * self.freq == 0:
             model = kwargs["model"]
             preds = []
             with torch.no_grad():
@@ -92,3 +100,17 @@ class WandbPredictionProgressCallback(WandbCallback):
                     lab=f"True Labels vs Model Predictions {i}",
                     step=state.global_step
                 )
+
+
+class SaveCallback(TrainerCallback):
+    DATASET_SAVE_NAME = "dataset.json"
+
+    def on_save(self, args: TrainingArguments, state: TrainerState,
+                control: TrainerControl, **kwargs):
+        """
+        Event called after a checkpoint save. For saving the dataloader state.
+        """
+        save_path = (
+                    Path(args.output_dir) / f"checkpoint-{state.global_step}" /
+                    self.DATASET_SAVE_NAME)
+        kwargs["train_dataloader"].dataset.save(save_path)
