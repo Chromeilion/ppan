@@ -1,3 +1,4 @@
+from ast import literal_eval
 import csv
 import os
 from abc import abstractmethod
@@ -95,8 +96,13 @@ class BaseDataset(IterableDataset):
         self._file_list = None
         self.midi_cache = defaultdict(dict)
 
+        # For saving and loading state
         self.current_iteration = 0
-        self.target_size = None
+        self.current_epoch = 0
+
+        # Target iteration is used when restoring from a checkpoint in
+        # order to know where we were originally.
+        self.target_iteration: Optional[int] = None
 
         augmentations = [
             v2.UniformTemporalSubsample(self.temporal_res_frames),
@@ -110,10 +116,6 @@ class BaseDataset(IterableDataset):
                 )
         self.augment = v2.Compose(augmentations)
         self.batch_size = batch_size
-
-        # Target iteration is used when restoring from a checkpoint in
-        # order to know where we were originally.
-        self.target_iteration: Optional[int] = None
 
         if checkpoint_location is not None:
             self.load(checkpoint_location)
@@ -137,14 +139,15 @@ class BaseDataset(IterableDataset):
         if self.target_iteration is not None:
             placeholder_batch = {"pixel_values": torch.zeros((1, 1)),
                                  "labels": torch.zeros((1, 1))}
-            while self.current_iteration < self.target_iteration:
-                self.current_iteration += 1
+            current_iteration = 0
+            while current_iteration < self.target_iteration:
+                current_iteration += 1
                 yield placeholder_batch
 
-        current_epoch = self.current_iteration // len(self)
-        iter_no = self.current_iteration - current_epoch * len(self)
-
-        for _ in range(self.epoch_size - current_epoch):
+        current_epoch = self.current_epoch
+        iter_no = self.current_iteration
+        for epoch in range(self.epoch_size - current_epoch):
+            self.current_epoch = epoch + current_epoch
             for vals in self.dali_iter:
                 for val in vals:
                     val['pixel_values'] = self.augment(val['pixel_values'])
@@ -152,12 +155,13 @@ class BaseDataset(IterableDataset):
                     iter_no += 1
                     self.current_iteration += 1
                     if self.max_iters_per_epoch is not None:
-                        if iter_no > self.max_iters_per_epoch:
+                        if iter_no >= self.max_iters_per_epoch:
                             break
                 if self.max_iters_per_epoch is not None:
-                    if iter_no > self.max_iters_per_epoch:
+                    if iter_no >= self.max_iters_per_epoch:
                         break
             iter_no = 0
+            self.current_iteration = 0
             # New epoch, we need to start from zero with the iterator
             self.dali_iter.reset()
 
@@ -171,19 +175,27 @@ class BaseDataset(IterableDataset):
 
     def get_iter(self, checkpoints: Optional[PathLike] = None):
         n = int(os.environ.get("PPAN_NO_GPU", 1))
+        num_threads = 2
+        dataset_idx = 0
         if checkpoints is not None:
-            pipes = [
-                self.video_pipe(
-                    batch_size=self.batch_size, num_threads=2,
-                    device_id=i, seed=seed, dataset_idx=0,
-                    num_gpus=n, checkpoint=checkpoints[i]
-                ) for i in range(n)
-            ]
+            pipes = []
+            for idx, i in enumerate(checkpoints):
+                with open(i, "rb") as f:
+                    checkpoint = f.read()
+                pipes.append(
+                    self.video_pipe(
+                        batch_size=self.batch_size,
+                        num_threads=num_threads,
+                        device_id=idx, seed=seed,
+                        dataset_idx=dataset_idx,
+                        num_gpus=n, checkpoint=checkpoint
+                    )
+                )
         else:
             pipes = [
                 self.video_pipe(
-                    batch_size=self.batch_size, num_threads=2,
-                    device_id=i, seed=seed, dataset_idx=0,
+                    batch_size=self.batch_size, num_threads=num_threads,
+                    device_id=i, seed=seed, dataset_idx=dataset_idx,
                     num_gpus=n
                 ) for i in range(n)
             ]
@@ -264,7 +276,7 @@ class BaseDataset(IterableDataset):
     def video_pipe_pytorch(self, video, label, dataset_idx):
         crop = torch.tensor(self.datasets[dataset_idx][label][-1])
         # Randomly resize the crop as an augmentation
-        crop += torch.randint(20, 60, [4]) * torch.tensor([-1, 1, -1, 1])
+        crop += torch.randint(20, 100, [4]) * torch.tensor([-1, 1, -1, 1])
         box = tv_tensors.BoundingBoxes(
             torch.tensor([crop[0], crop[2], crop[1], crop[3]]),
             format=tv_tensors.BoundingBoxFormat("XYXY"),
@@ -316,23 +328,40 @@ class BaseDataset(IterableDataset):
         """
         Save the state of the dataset.
         """
+        filepath = Path(filepath)
+        checkpoints = self.dali_iter.checkpoints()
+        savelocs = [
+            str(filepath/f"pipe_state_{i}.cpt") for i in
+            range(len(checkpoints))
+        ]
+        for loc, checkpoint in zip(savelocs, checkpoints):
+            with open(loc, "wb") as f:
+                f.write(checkpoint)
+
         checkpoints = {
-            "pipeline_states": [
-                i.decode("utf-8") for i in self.dali_iter.checkpoints()],
-            "current_iteration": self.current_iteration
+            "pipeline_states": savelocs,
+            "current_iteration": self.current_iteration,
+            "current_epoch": self.current_epoch
         }
-        with open(filepath, "w") as f:
+        with open(filepath/"dataset.json", "w") as f:
             json.dump(checkpoints, f)
 
     def load(self, filepath: PathLike):
         """
         Load the state of the dataset from a checkpoint.
         """
-        with open(filepath, "r") as f:
+        filepath = Path(filepath)
+
+        with open(filepath/"dataset.json", "r") as f:
             checkpoint = json.load(f)
 
-        self.dali_iter = self.get_iter(checkpoint["pipeline_states"])
-        self.target_iteration = checkpoint["current_iteration"]
+        self.dali_iter = self.get_iter(
+            checkpoint["pipeline_states"]
+        )
+        self.current_iteration = checkpoint["current_iteration"]
+        self.current_epoch = checkpoint["current_epoch"]
+        self.target_iteration = (self.current_iteration + self.current_epoch *
+                                 self.max_iters_per_epoch)
 
 
 class PPAnTrainDataset(BaseDataset):

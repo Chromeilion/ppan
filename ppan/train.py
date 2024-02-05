@@ -1,6 +1,6 @@
 import os
 from typing import Optional, Union
-from pathlib import Path
+import copy
 
 from dotenv import load_dotenv
 from transformers import (
@@ -51,10 +51,6 @@ def train(dataset_dir: PathLike,
         warmup_ratio = 0.1
     if scheduler_type is None:
         scheduler_type = "cosine"
-    dataset_checkpoint = None
-    if checkpoint_dir is not None:
-        dataset_checkpoint = (Path(checkpoint_dir) /
-                              SaveCallback.DATASET_SAVE_NAME)
 
     load_dotenv()
     no_gpu = int(os.environ.get("PPAN_NO_GPU", 1))
@@ -72,7 +68,7 @@ def train(dataset_dir: PathLike,
         epoch_size=no_epochs,
         cachefile_name="./train_cache.txt",
         max_iters_per_epoch=max_iters_per_epoch_train,
-        checkpoint_location=dataset_checkpoint
+        checkpoint_location=checkpoint_dir
     )
     test_ds = PPAnTrainDataset(
         datasets=[test_samples],
@@ -119,9 +115,11 @@ def train(dataset_dir: PathLike,
         data_collator=lambda x: x[0]
     )
     # Instantiate the WandbPredictionProgressCallback
+    # A copy of the dataset is passed so that the state isn't messed up
+    # for the Trainer.
     progress_callback = WandbPredictionProgressCallback(
         trainer=trainer,
-        val_dataset=test_ds
+        val_dataset=copy.copy(test_ds)
     )
     save_callback = SaveCallback()
     # Add the callback to the trainer

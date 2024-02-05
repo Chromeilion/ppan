@@ -35,7 +35,7 @@ class WandbPredictionProgressCallback(WandbCallback):
         """
         super().__init__()
         self.trainer: Trainer = trainer
-        iterator = iter(val_dataset)
+        iterator = iter(list(val_dataset))
         iterator_zero = next(iterator)
         self.sample_dataset = [next(iterator) for _ in range(num_samples)]
         # move all samples to the same gpu
@@ -110,7 +110,5 @@ class SaveCallback(TrainerCallback):
         """
         Event called after a checkpoint save. For saving the dataloader state.
         """
-        save_path = (
-                    Path(args.output_dir) / f"checkpoint-{state.global_step}" /
-                    self.DATASET_SAVE_NAME)
+        save_path = (Path(args.output_dir)/f"checkpoint-{state.global_step}/")
         kwargs["train_dataloader"].dataset.save(save_path)
