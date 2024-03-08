@@ -1,6 +1,6 @@
+import copy
 import os
 from typing import Optional, Union
-import copy
 
 from dotenv import load_dotenv
 from transformers import (
@@ -11,27 +11,28 @@ from transformers import (
 
 from ppan.config import seed, pretrained_model, num_labels
 from ppan.dataset import load_rach3, PPAnTrainDataset
-from ppan.trainer_callbacks import (WandbPredictionProgressCallback,
-                                    SaveCallback)
 from ppan.trainer import PPAnTrainer
+from ppan.trainer_callbacks import (WandbPredictionProgressCallback)
 
 PathLike = Union[str, bytes, os.PathLike]
 
 
 def train(dataset_dir: PathLike,
           output_dir: PathLike,
-          no_epochs: Optional[int],
-          eval_every: Optional[int],
-          save_every: Optional[int],
-          batch_size: Optional[int],
-          max_iters_per_epoch_test: Optional[int],
-          max_iters_per_epoch_train: Optional[int],
-          class_weights: Optional[float],
-          learning_rate: Optional[float],
-          weight_decay: Optional[float],
-          warmup_ratio: Optional[float],
-          scheduler_type: Optional[str],
+          no_epochs: Optional[int] = None,
+          eval_every: Optional[int] = None,
+          save_every: Optional[int] = None,
+          batch_size: Optional[int] = None,
+          max_iters_per_epoch_test: Optional[int] = None,
+          max_iters_per_epoch_train: Optional[int] = None,
+          class_weights: Optional[float] = None,
+          learning_rate: Optional[float] = None,
+          weight_decay: Optional[float] = None,
+          warmup_ratio: Optional[float] = None,
+          scheduler_type: Optional[str] = None,
           checkpoint_dir: Optional[PathLike] = None,
+          adam_beta1: Optional[float] = None,
+          adam_beta2: Optional[float] = None,
           *_, **__):
     if dataset_dir is None:
         raise AttributeError("The dataset directory is required for "
@@ -51,9 +52,15 @@ def train(dataset_dir: PathLike,
         warmup_ratio = 0.1
     if scheduler_type is None:
         scheduler_type = "cosine"
+    if adam_beta1 is None:
+        adam_beta1 = 0.9
+    if adam_beta2 is None:
+        adam_beta2 = 0.999
 
     load_dotenv()
     no_gpu = int(os.environ.get("PPAN_NO_GPU", 1))
+    # Use the linear scaling rule to calculate the lr, more info here:
+    # https://arxiv.org/abs/1706.02677
     lr = (learning_rate * batch_size * no_gpu) / 256.
 
     test_samples, train_samples = load_rach3(dataset_dir)
@@ -61,22 +68,22 @@ def train(dataset_dir: PathLike,
     processor = VideoMAEImageProcessor.from_pretrained(
         pretrained_model,
     )
+
     train_ds = PPAnTrainDataset(
         datasets=[train_samples],
         video_transform=processor,
-        batch_size=batch_size,
-        epoch_size=no_epochs,
+        epoch_size=1,
         cachefile_name="./train_cache.txt",
         max_iters_per_epoch=max_iters_per_epoch_train,
-        checkpoint_location=checkpoint_dir
+        batch_size=batch_size
     )
     test_ds = PPAnTrainDataset(
         datasets=[test_samples],
         video_transform=processor,
         epoch_size=1,
-        batch_size=batch_size,
         cachefile_name="./test_cache.txt",
-        max_iters_per_epoch=max_iters_per_epoch_test
+        max_iters_per_epoch=max_iters_per_epoch_test,
+        batch_size=batch_size
     )
     model = VideoMAEForVideoClassification.from_pretrained(
         pretrained_model,
@@ -85,19 +92,19 @@ def train(dataset_dir: PathLike,
     ).train()
 
     training_arguments = TrainingArguments(
+        num_train_epochs=no_epochs,
         output_dir=str(output_dir),
         evaluation_strategy="steps",
         eval_steps=eval_every,
         logging_steps=eval_every,
-        num_train_epochs=1,
         learning_rate=lr,
         do_train=True,
         do_eval=True,
         lr_scheduler_type=scheduler_type,
         warmup_ratio=warmup_ratio,
         seed=seed,
-        adam_beta1=0.9,
-        adam_beta2=0.999,
+        adam_beta1=adam_beta1,
+        adam_beta2=adam_beta2,
         weight_decay=weight_decay,
         optim="adamw_torch",
         save_steps=save_every,
@@ -121,8 +128,8 @@ def train(dataset_dir: PathLike,
         trainer=trainer,
         val_dataset=copy.copy(test_ds)
     )
-    save_callback = SaveCallback()
+#    save_callback = SaveCallback()
     # Add the callback to the trainer
     trainer.add_callback(progress_callback)
-    trainer.add_callback(save_callback)
+#    trainer.add_callback(save_callback)
     trainer.train(resume_from_checkpoint=checkpoint_dir)

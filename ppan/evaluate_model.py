@@ -1,10 +1,10 @@
 import json
+import os
 import pickle
 import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Union
-import os
 
 import mir_eval
 import numpy as np
@@ -13,6 +13,7 @@ from partitura import save_performance_midi
 from partitura.performance import PerformedPart, Performance
 from partitura.utils import pianoroll_to_notearray
 from rach3datautils.utils.multimedia import MultimediaTools
+from scipy.ndimage import gaussian_filter
 from torch import no_grad
 from tqdm import tqdm
 from transformers import (
@@ -45,12 +46,15 @@ def evaluate(dataset_dir: PathLike,
                       "the correct path to these predictions is passed in "
                       "preds_output.")
     if threshold is None:
-        threshold = 0.83
+        threshold = 0.5
     if batch_size is None:
-        batch_size = 20
+        batch_size = 2
+    gaussian_sigma = 1
 
     test, _ = load_rach3(dataset_dir)
 
+    # Set all midi files to None to guarantee no cheating can happen.
+    test_no_mid = [(i, None, k, l) for (i, j, k, l) in test]
     if not Path(preds_output).exists():
         model = VideoMAEForVideoClassification.from_pretrained(
             model_checkpoint
@@ -59,7 +63,7 @@ def evaluate(dataset_dir: PathLike,
             pretrained_model)
 
         dataset = PPAnEvalDataset(
-            datasets=[[test[0]]],
+            datasets=[[test_no_mid[5]]],
             video_transform=processor,
             batch_size=batch_size,
         )
@@ -73,8 +77,9 @@ def evaluate(dataset_dir: PathLike,
             preds_rach3 = pickle.load(f)
 
     for vid_path, preds in preds_rach3.items():
-        final_pred = threshold_and_calc_time(preds, threshold)
-        onset_array = final_pred_to_onset_array(final_pred)
+        final_pred = calc_time(preds)
+        onset_array = final_pred_to_onset_array(final_pred, threshold,
+                                                gaussian_sigma)
         onset_array = onset_array.astype(int) * 100
         session_files = [i for i in test if vid_path in str(i[2])][0]
         vid_len = MultimediaTools().ff_probe(session_files[2])
@@ -96,13 +101,16 @@ def evaluate(dataset_dir: PathLike,
             save_to_midi(onset_array, str(mid_output))
 
 
-def final_pred_to_onset_array(final_pred) -> np.ndarray:
+def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
     """Take model predictions and create an onset array (basically a
     pianoroll but with only onsets). When the model predicts a note over
     multiple frames, the middle predicted frame is used as the onset.
+    Also smooths the model output using a gaussian.
     """
     pred_array = np.array([i[1] for i in final_pred])
-
+    pred_array = gaussian_filter(pred_array, axes=[0], sigma=sigma,
+                                 radius=16)
+    pred_array = pred_array > threshold
     revised_preds = []
     nonzero_preds = pred_array.nonzero()
     nonzero_preds = list(zip(nonzero_preds[0], nonzero_preds[1]))
@@ -136,7 +144,8 @@ def eval_loop(dataset, model):
     preds_dict = defaultdict(list)
     sig = nn.Sigmoid()
     for i in tqdm(dataset):
-        preds = sig(model(i['pixel_values']))
+        logits = model(i['pixel_values']).logits
+        preds = sig(logits)
         all_files = dataset.get_all_video_samples()
         for timestamps, file_idx, pred in zip(i['timestamps'], i['file_idx'],
                                               preds):
@@ -171,12 +180,12 @@ def perf_to_int_pitch(perf):
 
 
 def calc_perf_eval(pred_perf, true_perf):
+    ref_intervals, ref_pitches = perf_to_int_pitch(true_perf)
     est_intervals, est_pitches = perf_to_int_pitch(pred_perf)
     # This line is necessary because the model labels are actually
     # calculated between two frames, therefore, to align the predictions
     # properly, we need to shift everything half a frame.
     est_intervals += temporal_res / 2.
-    ref_intervals, ref_pitches = perf_to_int_pitch(true_perf)
 
     return mir_eval.transcription.precision_recall_f1_overlap(
         est_intervals=est_intervals,
@@ -204,16 +213,15 @@ def calc_stats(midi: PPAnMidi, onset_array: np.ndarray):
     return mir_scores
 
 
-def threshold_and_calc_time(preds, threshold):
+def calc_time(preds):
     final_preds = []
     for pred, times in preds:
-        vals = pred > threshold
         middle = times.shape[0] // 2
         time = times[middle]
         if times.shape[0] % 2 == 0:
             time += times[middle+1]
             time = time / 2.
-        final_preds.append((time, vals))
+        final_preds.append((time, pred))
     # Because the windows don't start at time zero, we need to insert a few
     # frames at the start of the preds so that they start at zero.
     no_to_insert = int(final_preds[0][0] / (1./30.))

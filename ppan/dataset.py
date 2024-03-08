@@ -1,14 +1,12 @@
-from ast import literal_eval
 import csv
+import json
 import os
 from abc import abstractmethod
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable, Union
-import json
 
 import nvidia.dali.fn as fn
-from nvidia.dali import Pipeline
 import nvidia.dali.plugin.pytorch.fn as pfn
 import torch
 import torchvision.transforms.functional as functional
@@ -24,7 +22,6 @@ from transformers import VideoMAEImageProcessor
 from ppan.config import seed
 from ppan.midi import PPAnMidi
 
-
 PathLike = Union[str, bytes, os.PathLike]
 
 SAMPLE_TYPE = List[List[
@@ -38,7 +35,7 @@ class BaseDataset(IterableDataset):
     def __init__(
             self,
             datasets: SAMPLE_TYPE,
-            batch_size: Optional[int] = 4,
+            batch_size: int,
             epoch_size: Optional[int] = None,
             frame_transform: Optional[Callable[[torch.tensor],
                                                torch.tensor]] = None,
@@ -49,7 +46,7 @@ class BaseDataset(IterableDataset):
             step: Optional[int] = None,
             cachefile_name: Optional[str] = None,
             max_iters_per_epoch: Optional[int] = None,
-            checkpoint_location: Optional[PathLike] = None
+            target_epoch: Optional[int] = None
     ):
         """
         Parameters
@@ -79,6 +76,7 @@ class BaseDataset(IterableDataset):
         if cachefile_name is None:
             cachefile_name = "./ppan_cache.txt"
 
+        self.batch_size = batch_size
         self.lenience = 1
         self.max_iters_per_epoch = max_iters_per_epoch
         self.cachefile_name = cachefile_name
@@ -115,12 +113,11 @@ class BaseDataset(IterableDataset):
                                  std=self.video_transform.image_std)
                 )
         self.augment = v2.Compose(augmentations)
-        self.batch_size = batch_size
 
-        if checkpoint_location is not None:
-            self.load(checkpoint_location)
-        else:
-            self.dali_iter = self.get_iter()
+        self.dali_iter = self.get_iter()
+
+        if target_epoch is not None:
+            self.target_iteration = len(self) * target_epoch
 
     def __call__(self, *args, **kwargs):
         return self.__iter__()
@@ -137,10 +134,12 @@ class BaseDataset(IterableDataset):
         # through all the samples again (when in reality the state was loaded
         # outside the Trainer).
         if self.target_iteration is not None:
-            placeholder_batch = {"pixel_values": torch.zeros((1, 1)),
-                                 "labels": torch.zeros((1, 1))}
+            placeholder_batch = next(iter(self.dali_iter))[0]
+            placeholder_batch["pixel_values"] = self.augment(
+                placeholder_batch["pixel_values"])
+            placeholder_batch = self.finish_processing(placeholder_batch)
             current_iteration = 0
-            while current_iteration < self.target_iteration:
+            while current_iteration <= self.target_iteration:
                 current_iteration += 1
                 yield placeholder_batch
 
@@ -170,33 +169,39 @@ class BaseDataset(IterableDataset):
         ...
 
     @abstractmethod
-    def get_video_reader(self, dataset_idx, num_gpus) -> fn.readers.video:
+    def get_video_reader(self, dataset_idx, num_gpus,
+                         d_id) -> fn.readers.video:
         ...
 
-    def get_iter(self, checkpoints: Optional[PathLike] = None):
+    def get_iter(self, checkpoints: Optional[list[PathLike]] = None):
         n = int(os.environ.get("PPAN_NO_GPU", 1))
         num_threads = 2
         dataset_idx = 0
         if checkpoints is not None:
             pipes = []
             for idx, i in enumerate(checkpoints):
-                with open(i, "rb") as f:
-                    checkpoint = f.read()
                 pipes.append(
                     self.video_pipe(
-                        batch_size=self.batch_size,
                         num_threads=num_threads,
-                        device_id=idx, seed=seed,
+                        device_id=idx,
+                        seed=seed,
                         dataset_idx=dataset_idx,
-                        num_gpus=n, checkpoint=checkpoint
+                        num_gpus=len(checkpoints),
+                        checkpoint=i,
+                        d_id=idx,
+                        batch_size=self.batch_size
                     )
                 )
         else:
             pipes = [
                 self.video_pipe(
-                    batch_size=self.batch_size, num_threads=num_threads,
-                    device_id=i, seed=seed, dataset_idx=dataset_idx,
-                    num_gpus=n
+                    batch_size=self.batch_size,
+                    num_threads=num_threads,
+                    device_id=i,
+                    seed=seed,
+                    dataset_idx=dataset_idx,
+                    num_gpus=n,
+                    d_id=i
                 ) for i in range(n)
             ]
         dali_iter = DALIGenericIterator(
@@ -276,7 +281,7 @@ class BaseDataset(IterableDataset):
     def video_pipe_pytorch(self, video, label, dataset_idx):
         crop = torch.tensor(self.datasets[dataset_idx][label][-1])
         # Randomly resize the crop as an augmentation
-        crop += torch.randint(20, 100, [4]) * torch.tensor([-1, 1, -1, 1])
+        crop += torch.randint(10, 100, [4]) * torch.tensor([-1, 1, -1, 1])
         box = tv_tensors.BoundingBoxes(
             torch.tensor([crop[0], crop[2], crop[1], crop[3]]),
             format=tv_tensors.BoundingBoxFormat("XYXY"),
@@ -292,9 +297,9 @@ class BaseDataset(IterableDataset):
 
     def file_list(self, dataset_idx) -> str:
         if not os.path.exists(self.cachefile_name):
-                self._file_list = self._get_file_list(dataset_idx)
-                with open(self.cachefile_name, "wb") as f:
-                    f.writelines([str.encode(i) for i in self._file_list])
+            self._file_list = self._get_file_list(dataset_idx)
+            with open(self.cachefile_name, "wb") as f:
+                f.writelines([str.encode(i) for i in self._file_list])
         return self.cachefile_name
 
     def _get_file_list(self, dataset_idx) -> str:
@@ -309,9 +314,10 @@ class BaseDataset(IterableDataset):
         return "\n".join(file_list)
 
     @pipeline_def(enable_checkpointing=True)
-    def video_pipe(self, dataset_idx: int, num_gpus: int):
-        video, label, timestamps = self.get_video_reader(dataset_idx,
-                                                         num_gpus)
+    def video_pipe(self, dataset_idx: int, num_gpus: int, d_id: int):
+        video, label, timestamps = self.get_video_reader(
+            dataset_idx, num_gpus, d_id
+        )
         video = fn.transpose(video, perm=[0, 3, 1, 2])
         video = pfn.torch_python_function(
             video, label, dataset_idx,
@@ -350,9 +356,12 @@ class BaseDataset(IterableDataset):
         """
         Load the state of the dataset from a checkpoint.
         """
-        filepath = Path(filepath)
+        filepath = Path(filepath)/"dataset.json"
 
-        with open(filepath/"dataset.json", "r") as f:
+        if not filepath.exists():
+            raise FileNotFoundError("Could not find the dataset checkpoint!!!")
+
+        with open(filepath, "r") as f:
             checkpoint = json.load(f)
 
         self.dali_iter = self.get_iter(
@@ -360,8 +369,17 @@ class BaseDataset(IterableDataset):
         )
         self.current_iteration = checkpoint["current_iteration"]
         self.current_epoch = checkpoint["current_epoch"]
-        self.target_iteration = (self.current_iteration + self.current_epoch *
-                                 self.max_iters_per_epoch)
+
+        if self.max_iters_per_epoch is None:
+            self.target_iteration = (
+                    self.current_iteration + self.current_epoch *
+                    len(self.dali_iter)
+            )
+            return
+        self.target_iteration = (
+                self.current_iteration + self.current_epoch *
+                self.max_iters_per_epoch
+        )
 
 
 class PPAnTrainDataset(BaseDataset):
@@ -373,16 +391,17 @@ class PPAnTrainDataset(BaseDataset):
         return {'pixel_values': vals['pixel_values'],
                 'labels': vals['note_vec']}
 
-    def get_video_reader(self, dataset_idx, num_gpus) -> fn.readers.video:
+    def get_video_reader(self, dataset_idx, num_gpus, d_id
+                         ) -> fn.readers.video:
         return fn.readers.video(
             device="gpu",
             file_list=self.file_list(dataset_idx),
             enable_timestamps=True,
             sequence_length=self.no_frames_per_clip,
-            shard_id=Pipeline.current().device_id,
+            shard_id=d_id,
             random_shuffle=True,
             initial_fill=2,
-            name="VideoReader",
+            name=f"VideoReader",
             step=self.step,
             file_list_include_preceding_frame=True,
             num_shards=num_gpus
@@ -406,18 +425,19 @@ class PPAnEvalDataset(BaseDataset):
         [[all_vids.append(str(i[2])) for i in j] for j in self.datasets]
         return all_vids
 
-    def get_video_reader(self, dataset_idx, num_gpus) -> fn.readers.video:
+    def get_video_reader(self, dataset_idx, num_gpus,
+                         d_id) -> fn.readers.video:
         return fn.readers.video(
             device="gpu",
             filenames=self.get_all_video_samples(),
             labels=[],
             enable_timestamps=True,
             sequence_length=self.no_frames_per_clip,
-            shard_id=Pipeline.current().device_id,
+            shard_id=d_id,
             num_shards=num_gpus,
             random_shuffle=False,
             initial_fill=2,
-            name="VideoReader",
+            name=f"VideoReader",
             step=self.step,
             file_list_include_preceding_frame=True,
         )

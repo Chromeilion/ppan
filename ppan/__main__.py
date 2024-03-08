@@ -146,6 +146,22 @@ def main():
              "huggingface trainer. Default is cosine.",
         required=False
     )
+    parser_train.add_argument(
+        "--adam-beta1",
+        action="store",
+        default=os.environ.get("PPAN_ADAM_BETA1", None),
+        type=float,
+        help="Adam optimizer beta1 parameter.",
+        required=False
+    )
+    parser_train.add_argument(
+        "--adam-beta2",
+        action="store",
+        default=os.environ.get("PPAN_ADAM_BETA2", None),
+        type=float,
+        help="Adam optimizer beta2 parameter.",
+        required=False
+    )
     parser_train.set_defaults(func=train)
 
     parser_eval = subparsers.add_parser(

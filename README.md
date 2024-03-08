@@ -1,5 +1,27 @@
-Current tensorboard results:
- https://tensorboard.dev/experiment/Hj5Ky562QSOYdYgBcJumog/ 
- 
-BERT training results: 
-https://tensorboard.dev/experiment/m9x73d35SkCjuwSzYFzrlw/#scalars
+# PPAN
+PPAN is a model for automatic onset detection from video.
+
+## Installing
+Make sure Cython is installed, then, from the repo root, simply run: 
+```shell
+pip install .
+```
+This will set up ppan in your current Python environment.
+
+## Running
+PPAN offers training and validation scripts. These can be run through
+the CLI. For more information run PPAN with -h like so:
+
+```shell
+python -m ppan -h
+```
+
+Because PPAN is built using the Huggingface library, one can easily use 
+accelerate to do multi-gpu training. PPAN additionally logs training 
+statistics to Weights & Biases, so if you'd like to run training you 
+will need an account set up.
+
+### Configuring
+PPAN can be configured by using environment variables or a .env file. To 
+see all available environment variables have a look at ```__main__.py```.
+All variables can also be passed as command line arguments.
