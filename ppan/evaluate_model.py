@@ -75,7 +75,6 @@ def evaluate(dataset_dir: PathLike,
     else:
         with open(preds_output, "rb") as f:
             preds_rach3 = pickle.load(f)
-
     for vid_path, preds in preds_rach3.items():
         final_pred = calc_time(preds)
         onset_array = final_pred_to_onset_array(final_pred, threshold,

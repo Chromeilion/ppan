@@ -70,7 +70,7 @@ def train(dataset_dir: PathLike,
     )
 
     train_ds = PPAnTrainDataset(
-        datasets=[train_samples],
+        datasets=train_samples,
         video_transform=processor,
         epoch_size=1,
         cachefile_name="./train_cache.txt",
@@ -78,7 +78,7 @@ def train(dataset_dir: PathLike,
         batch_size=batch_size
     )
     test_ds = PPAnTrainDataset(
-        datasets=[test_samples],
+        datasets=test_samples,
         video_transform=processor,
         epoch_size=1,
         cachefile_name="./test_cache.txt",
@@ -128,8 +128,7 @@ def train(dataset_dir: PathLike,
         trainer=trainer,
         val_dataset=copy.copy(test_ds)
     )
-#    save_callback = SaveCallback()
     # Add the callback to the trainer
     trainer.add_callback(progress_callback)
-#    trainer.add_callback(save_callback)
+
     trainer.train(resume_from_checkpoint=checkpoint_dir)
