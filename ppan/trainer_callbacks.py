@@ -37,7 +37,7 @@ class WandbPredictionProgressCallback(WandbCallback):
         self.trainer: Trainer = trainer
         iterator = iter(list(val_dataset))
         iterator_zero = next(iterator)
-        self.sample_dataset = [next(iterator) for _ in range(num_samples)]
+        self.sample_dataset = [next(iterator) for _ in range(num_samples*2)]
         # move all samples to the same gpu
         self.sample_dataset = [
             {key: val.to(iterator_zero[key].device)

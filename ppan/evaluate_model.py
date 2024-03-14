@@ -22,21 +22,23 @@ from transformers import (
 )
 
 from ppan.config import device, pretrained_model, fps, temporal_res
-from ppan.dataset import load_rach3, PPAnEvalDataset
+from ppan.dataset import load_all_data, PPAnEvalDataset
 from ppan.midi import PPAnMidi
 
 PathLike = Union[str, bytes, os.PathLike]
 
 
-def evaluate(dataset_dir: PathLike,
-             preds_output: PathLike,
+def evaluate(preds_output: PathLike,
              model_checkpoint: PathLike,
+             rach3_dir: Optional[PathLike] = None,
+             pianoyt_dir: Optional[PathLike] = None,
+             miditest_dir: Optional[PathLike] = None,
              midi_output: Optional[PathLike] = None,
              threshold: Optional[float] = None,
              batch_size: Optional[int] = None,
              *_, **__):
-    if dataset_dir is None:
-        raise AttributeError("The dataset directory is required to run "
+    if not [i for i in [rach3_dir, pianoyt_dir, miditest_dir] if i is not None]:
+        raise AttributeError("A dataset directory is required to run "
                              "evaluation.")
     if preds_output is None:
         raise AttributeError("A path to the output file is required.")
@@ -51,11 +53,28 @@ def evaluate(dataset_dir: PathLike,
         batch_size = 2
     gaussian_sigma = 1
 
-    test, _ = load_rach3(dataset_dir)
+    _, _, miditest, pianoyt_test, rach3_test = load_all_data(
+        rach3_dir, pianoyt_dir, miditest_dir
+    )
+    datasets = [miditest, pianoyt_test, rach3_test]
+    dataset_names = ["miditest", "pianoyt", "rach3"]
+    [evaluate_on_dataset(
+        i,
+        dataset_name=j,
+        model_checkpoint=model_checkpoint,
+        batch_size=batch_size,
+        gaussian_sigma=gaussian_sigma,
+        threshold=threshold,
+        midi_output=midi_output
+    ) for i, j in zip(datasets, dataset_names)]
 
+
+def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
+                        gaussian_sigma, threshold, midi_output):
+    preds_output = Path(dataset_name+"_preds.pkl")
     # Set all midi files to None to guarantee no cheating can happen.
-    test_no_mid = [(i, None, k, l) for (i, j, k, l) in test]
-    if not Path(preds_output).exists():
+    test_no_mid = [(None, j, k, l, m, n) for (i, j, k, l, m, n) in samples]
+    if not preds_output.exists():
         model = VideoMAEForVideoClassification.from_pretrained(
             model_checkpoint
         ).eval().to(device)
@@ -63,7 +82,7 @@ def evaluate(dataset_dir: PathLike,
             pretrained_model)
 
         dataset = PPAnEvalDataset(
-            datasets=[[test_no_mid[5]]],
+            datasets=[test_no_mid[5]],
             video_transform=processor,
             batch_size=batch_size,
         )
@@ -80,7 +99,7 @@ def evaluate(dataset_dir: PathLike,
         onset_array = final_pred_to_onset_array(final_pred, threshold,
                                                 gaussian_sigma)
         onset_array = onset_array.astype(int) * 100
-        session_files = [i for i in test if vid_path in str(i[2])][0]
+        session_files = [i for i in samples if vid_path in str(i[2])][0]
         vid_len = MultimediaTools().ff_probe(session_files[2])
         vid_len = float(vid_len["streams"][0]["duration"])
         midi = PPAnMidi(vid_len, temporal_res, 0)
@@ -89,7 +108,7 @@ def evaluate(dataset_dir: PathLike,
             midi=midi,
             onset_array=onset_array
         )
-        with open("./mir_stats.json", "w") as f:
+        with open(f"./{dataset_name}_mir_stats.json", "w") as f:
             json.dump(mir_stats, f)
 
         if midi_output is not None:

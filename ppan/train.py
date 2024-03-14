@@ -1,6 +1,7 @@
 import copy
 import os
 from typing import Optional, Union
+from random import shuffle
 
 from dotenv import load_dotenv
 from transformers import (
@@ -10,14 +11,16 @@ from transformers import (
 )
 
 from ppan.config import seed, pretrained_model, num_labels
-from ppan.dataset import load_rach3, PPAnTrainDataset
+from ppan.dataset import load_all_data, PPAnTrainDataset
 from ppan.trainer import PPAnTrainer
 from ppan.trainer_callbacks import (WandbPredictionProgressCallback)
 
 PathLike = Union[str, bytes, os.PathLike]
 
 
-def train(dataset_dir: PathLike,
+def train(rach3_dir: PathLike,
+          pianoyt_dir: PathLike,
+          miditest_dir: PathLike,
           output_dir: PathLike,
           no_epochs: Optional[int] = None,
           eval_every: Optional[int] = None,
@@ -34,7 +37,7 @@ def train(dataset_dir: PathLike,
           adam_beta1: Optional[float] = None,
           adam_beta2: Optional[float] = None,
           *_, **__):
-    if dataset_dir is None:
+    if rach3_dir is None:
         raise AttributeError("The dataset directory is required for "
                              "model training.")
     if output_dir is None:
@@ -63,8 +66,11 @@ def train(dataset_dir: PathLike,
     # https://arxiv.org/abs/1706.02677
     lr = (learning_rate * batch_size * no_gpu) / 256.
 
-    test_samples, train_samples = load_rach3(dataset_dir)
-
+    test_samples, train_samples, _, _, _ = load_all_data(
+        rach3_dir, pianoyt_dir, miditest_dir
+    )
+    shuffle(test_samples)
+    shuffle(train_samples)
     processor = VideoMAEImageProcessor.from_pretrained(
         pretrained_model,
     )
