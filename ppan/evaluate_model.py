@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Union
 
+from accelerate import Accelerator
 import mir_eval
 import numpy as np
 import torch.nn as nn
@@ -21,22 +22,24 @@ from transformers import (
     VideoMAEImageProcessor
 )
 
-from ppan.config import device, pretrained_model, fps, temporal_res
-from ppan.dataset import load_rach3, PPAnEvalDataset
+from ppan.config import pretrained_model, fps, temporal_res
+from ppan.dataset import load_all_data, PPAnEvalDataset
 from ppan.midi import PPAnMidi
 
 PathLike = Union[str, bytes, os.PathLike]
 
 
-def evaluate(dataset_dir: PathLike,
-             preds_output: PathLike,
+def evaluate(preds_output: PathLike,
              model_checkpoint: PathLike,
+             rach3_dir: Optional[PathLike] = None,
+             pianoyt_dir: Optional[PathLike] = None,
+             miditest_dir: Optional[PathLike] = None,
              midi_output: Optional[PathLike] = None,
              threshold: Optional[float] = None,
              batch_size: Optional[int] = None,
              *_, **__):
-    if dataset_dir is None:
-        raise AttributeError("The dataset directory is required to run "
+    if not [i for i in [rach3_dir, pianoyt_dir, miditest_dir] if i is not None]:
+        raise AttributeError("A dataset directory is required to run "
                              "evaluation.")
     if preds_output is None:
         raise AttributeError("A path to the output file is required.")
@@ -48,40 +51,55 @@ def evaluate(dataset_dir: PathLike,
     if threshold is None:
         threshold = 0.5
     if batch_size is None:
-        batch_size = 2
+        batch_size = 8
     gaussian_sigma = 1
 
-    test, _ = load_rach3(dataset_dir)
+    _, _, miditest, pianoyt_test, rach3_test = load_all_data(
+        rach3_dir, pianoyt_dir, miditest_dir
+    )
+    datasets = [miditest, pianoyt_test, rach3_test]
+    dataset_names = ["miditest", "pianoyt", "rach3"]
+    datasets = [datasets[0]]
+    dataset_names = [dataset_names[0]]
+    [evaluate_on_dataset(
+        i,
+        dataset_name=j,
+        model_checkpoint=model_checkpoint,
+        batch_size=batch_size,
+        gaussian_sigma=gaussian_sigma,
+        threshold=threshold,
+        midi_output=midi_output
+    ) for i, j in zip(datasets, dataset_names)]
 
-    # Set all midi files to None to guarantee no cheating can happen.
-    test_no_mid = [(i, None, k, l) for (i, j, k, l) in test]
-    if not Path(preds_output).exists():
-        model = VideoMAEForVideoClassification.from_pretrained(
-            model_checkpoint
-        ).eval().to(device)
+
+def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
+                        gaussian_sigma, threshold, midi_output):
+    preds_output = Path(dataset_name+"_preds.pkl")
+    if not preds_output.exists():
         processor = VideoMAEImageProcessor.from_pretrained(
-            pretrained_model)
-
+            pretrained_model
+        )
         dataset = PPAnEvalDataset(
-            datasets=[[test_no_mid[5]]],
+            datasets=[samples[5]],
             video_transform=processor,
             batch_size=batch_size,
+            step=1
         )
         with no_grad():
-            preds_rach3 = eval_loop(dataset=dataset, model=model)
+            preds_rach3 = eval_loop(dataset=dataset,
+                                    model_checkpoint=model_checkpoint)
 
         with open(preds_output, "wb") as f:
             pickle.dump(obj=preds_rach3, file=f)
     else:
         with open(preds_output, "rb") as f:
             preds_rach3 = pickle.load(f)
-
     for vid_path, preds in preds_rach3.items():
         final_pred = calc_time(preds)
         onset_array = final_pred_to_onset_array(final_pred, threshold,
                                                 gaussian_sigma)
         onset_array = onset_array.astype(int) * 100
-        session_files = [i for i in test if vid_path in str(i[2])][0]
+        session_files = [i for i in samples if vid_path in str(i[2])][0]
         vid_len = MultimediaTools().ff_probe(session_files[2])
         vid_len = float(vid_len["streams"][0]["duration"])
         midi = PPAnMidi(vid_len, temporal_res, 0)
@@ -90,7 +108,7 @@ def evaluate(dataset_dir: PathLike,
             midi=midi,
             onset_array=onset_array
         )
-        with open("./mir_stats.json", "w") as f:
+        with open(f"./{dataset_name}_mir_stats.json", "w") as f:
             json.dump(mir_stats, f)
 
         if midi_output is not None:
@@ -140,14 +158,26 @@ def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
     return onset_array.T
 
 
-def eval_loop(dataset, model):
+def eval_loop(dataset, model_checkpoint):
+    accelerator = Accelerator()
+    ac_device = accelerator.device
+
+    model = VideoMAEForVideoClassification.from_pretrained(
+        model_checkpoint
+    ).eval().to(ac_device)
+
+    dataset, model = accelerator.prepare(
+        dataset, model
+    )
+
     preds_dict = defaultdict(list)
     sig = nn.Sigmoid()
     for i in tqdm(dataset):
-        logits = model(i['pixel_values']).logits
+        logits = model(i['pixel_values'].to(ac_device)).logits
         preds = sig(logits)
         all_files = dataset.get_all_video_samples()
-        for timestamps, file_idx, pred in zip(i['timestamps'], i['file_idx'],
+        for timestamps, file_idx, pred in zip(i['timestamps'].to(ac_device),
+                                              i['file_idx'].to(ac_device),
                                               preds):
             vid_file = all_files[file_idx]
             preds_dict[vid_file].append((pred.cpu().numpy(),

@@ -17,22 +17,22 @@ def main():
     )
     subparsers = parser.add_subparsers(required=True)
 
-    dataset_dir_args = ["-d", "--dataset-dir"]
-    dataset_dir_kwargs = {
-        "nargs": "*",
-        "default": os.environ.get("PPAN_DATASET_DIR"),
+    datasets = ["rach3", "pianoyt", "miditest"]
+    dataset_dir_args = [[f"--{i}-dir"] for i in datasets]
+    dataset_dir_kwargs = [{
+        "default": os.environ.get(f"PPAN_{i.upper()}_DIR"),
         "action": "store",
-        "help": "Path to rach3 and piano_yt datasets",
+        "help": f"Path to {i} dataset",
         "required": False
-    }
+    } for i in datasets]
     parser_train = subparsers.add_parser(
         "train",
         help="Train the network on some data."
     )
-    parser_train.add_argument(
-        *dataset_dir_args,
-        **dataset_dir_kwargs
-    )
+    [parser_train.add_argument(
+        *i,
+        **j
+    ) for i, j in zip(dataset_dir_args, dataset_dir_kwargs)]
     parser_train.add_argument(
         "-o", "--output-dir",
         action="store",
@@ -169,10 +169,10 @@ def main():
         help="Run inference using a trained model, calculate MIR statistics, "
              "and save the outputs as a MIDI file."
     )
-    parser_eval.add_argument(
-        *dataset_dir_args,
-        **dataset_dir_kwargs
-    )
+    [parser_eval.add_argument(
+        *i,
+        **j
+    ) for i, j in zip(dataset_dir_args, dataset_dir_kwargs)]
     parser_eval.add_argument(
         "-m", "--model-checkpoint",
         action="store",
@@ -191,6 +191,13 @@ def main():
         "-om", "--midi-output",
         action="store",
         default=os.environ.get("PPAN_EVAL_MIDI_OUTPUT", None),
+        help="The folder where predicted MIDI files should be saved.",
+        required=False,
+    )
+    parser_eval.add_argument(
+        "--batch-size",
+        action="store",
+        default=os.environ.get("PPAN_EVAL_BATCH_SIZE", None),
         help="The folder where predicted MIDI files should be saved.",
         required=False,
     )
