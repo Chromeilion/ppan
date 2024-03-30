@@ -446,7 +446,7 @@ class PPAnEvalDataset(BaseDataset):
             random_shuffle=False,
             initial_fill=2,
             name=f"VideoReader",
-            step=self.step,
+            step=1,
             file_list_include_preceding_frame=True,
         )
 

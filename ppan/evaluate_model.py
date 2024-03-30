@@ -22,7 +22,7 @@ from transformers import (
     VideoMAEImageProcessor
 )
 
-from ppan.config import device, pretrained_model, fps, temporal_res
+from ppan.config import pretrained_model, fps, temporal_res
 from ppan.dataset import load_all_data, PPAnEvalDataset
 from ppan.midi import PPAnMidi
 
@@ -75,14 +75,12 @@ def evaluate(preds_output: PathLike,
 def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
                         gaussian_sigma, threshold, midi_output):
     preds_output = Path(dataset_name+"_preds.pkl")
-    # Set all midi files to None to guarantee no cheating can happen.
-    test_no_mid = [(None, j, k, l, m, n) for (i, j, k, l, m, n) in samples]
     if not preds_output.exists():
         processor = VideoMAEImageProcessor.from_pretrained(
             pretrained_model
         )
         dataset = PPAnEvalDataset(
-            datasets=[test_no_mid[5]],
+            datasets=[samples[5]],
             video_transform=processor,
             batch_size=batch_size,
             step=1
