@@ -6,6 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Union
 
+from accelerate import Accelerator
 import mir_eval
 import numpy as np
 import torch.nn as nn
@@ -50,7 +51,7 @@ def evaluate(preds_output: PathLike,
     if threshold is None:
         threshold = 0.5
     if batch_size is None:
-        batch_size = 2
+        batch_size = 8
     gaussian_sigma = 1
 
     _, _, miditest, pianoyt_test, rach3_test = load_all_data(
@@ -58,6 +59,8 @@ def evaluate(preds_output: PathLike,
     )
     datasets = [miditest, pianoyt_test, rach3_test]
     dataset_names = ["miditest", "pianoyt", "rach3"]
+    datasets = [datasets[0]]
+    dataset_names = [dataset_names[0]]
     [evaluate_on_dataset(
         i,
         dataset_name=j,
@@ -75,19 +78,18 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
     # Set all midi files to None to guarantee no cheating can happen.
     test_no_mid = [(None, j, k, l, m, n) for (i, j, k, l, m, n) in samples]
     if not preds_output.exists():
-        model = VideoMAEForVideoClassification.from_pretrained(
-            model_checkpoint
-        ).eval().to(device)
         processor = VideoMAEImageProcessor.from_pretrained(
-            pretrained_model)
-
+            pretrained_model
+        )
         dataset = PPAnEvalDataset(
             datasets=[test_no_mid[5]],
             video_transform=processor,
             batch_size=batch_size,
+            step=1
         )
         with no_grad():
-            preds_rach3 = eval_loop(dataset=dataset, model=model)
+            preds_rach3 = eval_loop(dataset=dataset,
+                                    model_checkpoint=model_checkpoint)
 
         with open(preds_output, "wb") as f:
             pickle.dump(obj=preds_rach3, file=f)
@@ -158,14 +160,26 @@ def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
     return onset_array.T
 
 
-def eval_loop(dataset, model):
+def eval_loop(dataset, model_checkpoint):
+    accelerator = Accelerator()
+    ac_device = accelerator.device
+
+    model = VideoMAEForVideoClassification.from_pretrained(
+        model_checkpoint
+    ).eval().to(ac_device)
+
+    dataset, model = accelerator.prepare(
+        dataset, model
+    )
+
     preds_dict = defaultdict(list)
     sig = nn.Sigmoid()
     for i in tqdm(dataset):
-        logits = model(i['pixel_values']).logits
+        logits = model(i['pixel_values'].to(ac_device)).logits
         preds = sig(logits)
         all_files = dataset.get_all_video_samples()
-        for timestamps, file_idx, pred in zip(i['timestamps'], i['file_idx'],
+        for timestamps, file_idx, pred in zip(i['timestamps'].to(ac_device),
+                                              i['file_idx'].to(ac_device),
                                               preds):
             vid_file = all_files[file_idx]
             preds_dict[vid_file].append((pred.cpu().numpy(),

@@ -69,6 +69,10 @@ def train(rach3_dir: PathLike,
     test_samples, train_samples, _, _, _ = load_all_data(
         rach3_dir, pianoyt_dir, miditest_dir
     )
+    # Remove a third of the dataset for faster training...
+    train_samples = [
+        v for i, v in enumerate(train_samples) if not i % 3 == 0
+    ]
     shuffle(test_samples)
     shuffle(train_samples)
     processor = VideoMAEImageProcessor.from_pretrained(
@@ -94,7 +98,8 @@ def train(rach3_dir: PathLike,
     model = VideoMAEForVideoClassification.from_pretrained(
         pretrained_model,
         problem_type="regression",
-        num_labels=num_labels
+        num_labels=num_labels,
+        ignore_mismatched_sizes=True
     ).train()
 
     training_arguments = TrainingArguments(

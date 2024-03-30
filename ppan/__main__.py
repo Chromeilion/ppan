@@ -194,6 +194,13 @@ def main():
         help="The folder where predicted MIDI files should be saved.",
         required=False,
     )
+    parser_eval.add_argument(
+        "--batch-size",
+        action="store",
+        default=os.environ.get("PPAN_EVAL_BATCH_SIZE", None),
+        help="The folder where predicted MIDI files should be saved.",
+        required=False,
+    )
     parser_eval.set_defaults(func=evaluate)
 
     args = parser.parse_args()

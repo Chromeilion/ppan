@@ -9,15 +9,16 @@ import nvidia.dali.fn as fn
 import nvidia.dali.plugin.pytorch.fn as pfn
 import torch
 import torchvision.transforms.functional as functional
+import torchvision.tv_tensors
 from nvidia.dali import pipeline_def
 from nvidia.dali.plugin.pytorch import DALIGenericIterator
 from rach3datautils.utils.dataset import DatasetUtils
 from rach3datautils.utils.multimedia import MultimediaTools
 from torch.utils.data import IterableDataset
+
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 from transformers import VideoMAEImageProcessor
-
 from ppan.config import seed
 from ppan.midi import PPAnMidi
 
@@ -29,6 +30,24 @@ SAMPLE_TYPE = List[
     Tuple[PathLike, Optional[PathLike], PathLike,
           Optional[tuple[int, int, int, int]], bool, bool]
 ]
+
+
+# Tensor GN pipeline, taken from:
+# https://github.com/pytorch/vision/issues/6192#issuecomment-1164176231
+def gauss_noise_tensor(img):
+    assert isinstance(img, torch.Tensor)
+    dtype = img.dtype
+    if not img.is_floating_point():
+        img = img.to(torch.float32)
+
+    sigma = 5.0
+
+    out = img + sigma * torch.randn_like(img)
+
+    if out.dtype != dtype:
+        out = out.to(dtype)
+
+    return out
 
 
 class BaseDataset(IterableDataset):
@@ -75,7 +94,7 @@ class BaseDataset(IterableDataset):
         if epoch_size is None:
             epoch_size = 1
         if step is None:
-            step = 1
+            step = 2
         if cachefile_name is None:
             cachefile_name = "./ppan_cache.txt"
 
@@ -97,18 +116,7 @@ class BaseDataset(IterableDataset):
         self._file_list = None
         self.midi_cache: dict[int, PPAnMidi] = {}
 
-        augmentations = [
-            v2.UniformTemporalSubsample(self.temporal_res_frames),
-            v2.ToDtype(torch.float, scale=True),
-        ]
-        if self.video_transform is not None:
-            if self.video_transform.do_normalize:
-                augmentations.append(
-                    v2.Normalize(mean=self.video_transform.image_mean,
-                                 std=self.video_transform.image_std)
-                )
-        self.augment = v2.Compose(augmentations)
-
+        self._augment = None
         self.dali_iter = self.get_iter()
 
         if target_epoch is not None:
@@ -128,7 +136,6 @@ class BaseDataset(IterableDataset):
             iter_no = 0
             for vals in self.dali_iter:
                 for val in vals:
-                    val['pixel_values'] = self.augment(val['pixel_values'])
                     yield self.finish_processing(val)
                     iter_no += 1
                     if self.max_iters_per_epoch is not None:
@@ -146,6 +153,11 @@ class BaseDataset(IterableDataset):
 
     @abstractmethod
     def get_video_reader(self, num_gpus, d_id) -> fn.readers.video:
+        ...
+
+    @property
+    @abstractmethod
+    def augmentations(self):
         ...
 
     def get_iter(self):
@@ -197,13 +209,15 @@ class BaseDataset(IterableDataset):
         plt.show()
 
     @staticmethod
-    def do_crop(video, box) -> torch.tensor:
+    def do_crop(video: torch.Tensor,
+                box: torchvision.tv_tensors.TVTensor) -> torch.tensor:
         """Apply a crop using a bounding box."""
         bbx = v2.ConvertBoundingBoxFormat("XYWH")(box)
         return functional.crop(
             video, bbx[0, 0], bbx[0, 1], bbx[0, 2], bbx[0, 3])
 
-    def midi_pipe_pytorch(self, label, timestamps):
+    def midi_pipe_pytorch(self, label: torch.Tensor,
+                          timestamps: torch.Tensor):
         """Load labels from the correct MIDI file.
         """
         if self.dataset[label[0].item()][0] is None:
@@ -238,7 +252,8 @@ class BaseDataset(IterableDataset):
             )
         return notes_vec
 
-    def video_pipe_pytorch(self, video, label):
+    def video_pipe_pytorch(self, video: torch.Tensor,
+                           label: torch.Tensor):
         sample = self.dataset[label]
         crop = sample[3]
         rotate_180 = sample[4]
@@ -247,8 +262,8 @@ class BaseDataset(IterableDataset):
             crop = torch.tensor(crop)
             if random_resize:
                 # Randomly resize the crop as an augmentation
-                rand_am = torch.randint(0, 10, [2])
-                rand_am2 = torch.randint(0, 150, [2])
+                rand_am = torch.randint(-20, 20, [2])
+                rand_am2 = torch.randint(-20, 20, [2])
                 crop[[1, 3]] += rand_am
                 crop[[0, 2]] -= rand_am2
 
@@ -258,6 +273,22 @@ class BaseDataset(IterableDataset):
                 canvas_size=video.shape[2:]
             )
             video = self.do_crop(video, box)
+
+        # Rotate the video into the correct orientation.
+        if rotate_180:
+            video = functional.rotate(video, 180)
+
+        # Wrap the rectangle such that it fits into a square better.
+        vid_size = list(video.size())
+        vid_size[-2] = vid_size[-2] * 2
+        vid_size[-1] = vid_size[-1] // 2
+        wrapped = torch.zeros(size=vid_size, dtype=video.dtype).to(video.device)
+        wrapped[..., :video.shape[-2], :] = video[..., :vid_size[-1]]
+        wrapped[..., video.shape[-2]:, :] = video[..., vid_size[-1]:vid_size[-1]*2]
+        video = wrapped
+
+        video = self._pad_to_square(video)
+
         # Although we apply the model transformation later, we resize
         # here in order to reduce the amount of used memory.
         video = functional.resize(
@@ -265,8 +296,24 @@ class BaseDataset(IterableDataset):
             [self.video_transform.crop_size["height"],
              self.video_transform.crop_size["width"]]
         )
-        if rotate_180:
-            video = functional.rotate(video, 180)
+        # Apply augmentations to the cropped video
+        video = self.augmentations(video)
+
+        return video
+
+    @staticmethod
+    def _pad_to_square(video: torch.Tensor):
+        # Pad the video into a square shape to prevent any more
+        # changes to the aspect ratio.
+        shortest_dim = torch.argmin(torch.tensor(video.shape[-2:]))
+        max_dim = torch.argmax(torch.tensor(video.shape[-2:]))
+
+        amount_to_pad = (video.shape[-2:][max_dim] -
+                         video.shape[-2:][shortest_dim])
+        if shortest_dim == 1:
+            video = v2.functional.pad(video, [amount_to_pad, 0])
+        else:
+            video = v2.functional.pad(video, [0, amount_to_pad])
         return video
 
     def file_list(self) -> str:
@@ -310,6 +357,30 @@ class PPAnTrainDataset(BaseDataset):
     Dataset object for training on a video/midi dataset such as Rach3.
     Handles loading, preprocessing, and batching all necessary files.
     """
+    @property
+    def augmentations(self):
+        if self._augment is None:
+            augmentations = [
+                v2.UniformTemporalSubsample(self.temporal_res_frames),
+                v2.RandomApply([
+                    v2.ColorJitter(hue=0.1,
+                                   brightness=0.2,
+                                   contrast=0.1,
+                                   saturation=0.1)
+                ],
+                    p=0.25
+                ),
+                v2.ToDtype(torch.float, scale=True),
+            ]
+            if self.video_transform is not None:
+                if self.video_transform.do_normalize:
+                    augmentations.append(
+                        v2.Normalize(mean=self.video_transform.image_mean,
+                                     std=self.video_transform.image_std)
+                    )
+            self._augment = v2.Compose(augmentations)
+        return self._augment
+
     def finish_processing(self, vals):
         return {'pixel_values': vals['pixel_values'],
                 'labels': vals['note_vec']}
@@ -336,6 +407,22 @@ class PPAnEvalDataset(BaseDataset):
     For evaluating on a video/midi dataset. Loads clips sequentially and
     returns the timestamp.
     """
+    @property
+    def augmentations(self):
+        if self._augment is None:
+            augmentations = [
+                v2.UniformTemporalSubsample(self.temporal_res_frames),
+                v2.ToDtype(torch.float, scale=True),
+            ]
+            if self.video_transform is not None:
+                if self.video_transform.do_normalize:
+                    augmentations.append(
+                        v2.Normalize(mean=self.video_transform.image_mean,
+                                     std=self.video_transform.image_std)
+                    )
+            self._augment = v2.Compose(augmentations)
+        return self._augment
+
     def finish_processing(self, vals):
         return {'pixel_values': vals['pixel_values'],
                 'labels': vals['note_vec'],
