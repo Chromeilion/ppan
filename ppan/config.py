@@ -32,4 +32,4 @@ disable_beta_transforms_warning()
 
 # Model configuration
 pretrained_model: str = environ.get("PPAN_PRETRAINED_MODEL",
-                                    "MCG-NJU/videomae-base")
+                                    "MCG-NJU/videomae-small-finetuned-kinetics")

@@ -59,8 +59,6 @@ def evaluate(preds_output: PathLike,
     )
     datasets = [miditest, pianoyt_test, rach3_test]
     dataset_names = ["miditest", "pianoyt", "rach3"]
-    datasets = [datasets[0]]
-    dataset_names = [dataset_names[0]]
     [evaluate_on_dataset(
         i,
         dataset_name=j,
