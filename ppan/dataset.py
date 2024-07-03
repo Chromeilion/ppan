@@ -4,7 +4,10 @@ import os
 from abc import abstractmethod
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable, Union
+import glob
 
+from ultralytics import YOLO
+from tqdm import tqdm
 import nvidia.dali.fn as fn
 import nvidia.dali.plugin.pytorch.fn as pfn
 import torch
@@ -28,9 +31,9 @@ PathLike = Union[str, bytes, os.PathLike]
 #   random_resize]]
 SAMPLE_TYPE = List[
     Tuple[PathLike, Optional[PathLike], PathLike,
-          Optional[tuple[int, int, int, int]], bool, bool]
+          Optional[tuple[int, int, int, int]], bool, bool, PathLike]
 ]
-
+TEST_TRAIN_SPLIT = tuple[list[SAMPLE_TYPE], list[SAMPLE_TYPE]]
 
 # Tensor GN pipeline, taken from:
 # https://github.com/pytorch/vision/issues/6192#issuecomment-1164176231
@@ -94,7 +97,7 @@ class BaseDataset(IterableDataset):
         if epoch_size is None:
             epoch_size = 1
         if step is None:
-            step = 2
+            step = 1
         if cachefile_name is None:
             cachefile_name = "./ppan_cache.txt"
 
@@ -126,10 +129,10 @@ class BaseDataset(IterableDataset):
         return self.__iter__()
 
     def __len__(self):
+        iter_len = len(self.dali_iter) * int(os.environ.get("PPAN_NO_GPU", 1))
         if self.max_iters_per_epoch is None:
-            return self.epoch_size * len(self.dali_iter)
-        return self.epoch_size * min(len(self.dali_iter),
-                                     self.max_iters_per_epoch)
+            return self.epoch_size * iter_len
+        return self.epoch_size * min(iter_len, self.max_iters_per_epoch)
 
     def __iter__(self) -> dict[str, torch.Tensor]:
         for epoch in range(self.epoch_size):
@@ -258,12 +261,19 @@ class BaseDataset(IterableDataset):
         crop = sample[3]
         rotate_180 = sample[4]
         random_resize = sample[5]
+
+        # Some videos are the wrong resolution smh my head
+        if video.shape[-1] == 1920 and abs(crop[-1] - 1280) < 50 and crop[-2] < 50:
+            video = v2.functional.resize(video, [720, 1280])
+        if video.shape[-1] == 1280 and abs(crop[-1] - 1920) < 50 and crop[-2] < 50:
+            video = v2.functional.resize(video, [1080, 1920])
+
         if crop is not None:
             crop = torch.tensor(crop)
             if random_resize:
                 # Randomly resize the crop as an augmentation
-                rand_am = torch.randint(-20, 20, [2])
-                rand_am2 = torch.randint(-20, 20, [2])
+                rand_am = torch.randint(-20, 10, [2])
+                rand_am2 = torch.randint(-20, 10, [2])
                 crop[[1, 3]] += rand_am
                 crop[[0, 2]] -= rand_am2
 
@@ -278,6 +288,12 @@ class BaseDataset(IterableDataset):
         if rotate_180:
             video = functional.rotate(video, 180)
 
+        try:
+            if sample[6] is not None:
+                video = functional.hflip(video)
+        except IndexError:
+            pass
+
         # Wrap the rectangle such that it fits into a square better.
         vid_size = list(video.size())
         vid_size[-2] = vid_size[-2] * 2
@@ -287,10 +303,11 @@ class BaseDataset(IterableDataset):
         wrapped[..., video.shape[-2]:, :] = video[..., vid_size[-1]:vid_size[-1]*2]
         video = wrapped
 
-        video = self._pad_to_square(video)
+#        video = self._pad_to_square(video)
 
-        # Although we apply the model transformation later, we resize
-        # here in order to reduce the amount of used memory.
+        # Although we apply the model transformation later (which includes
+        # a resize), we resize here in order to reduce the amount of used
+        # memory and speed up augmentations.
         video = functional.resize(
             video,
             [self.video_transform.crop_size["height"],
@@ -364,22 +381,25 @@ class PPAnTrainDataset(BaseDataset):
                 v2.UniformTemporalSubsample(self.temporal_res_frames),
                 v2.RandomApply([
                     v2.ColorJitter(hue=0.1,
-                                   brightness=0.2,
+                                   brightness=0.15,
                                    contrast=0.1,
                                    saturation=0.1)
                 ],
                     p=0.25
                 ),
-                v2.ToDtype(torch.float, scale=True),
+                v2.RandomPerspective(distortion_scale=0.1, p=0.25),
+                v2.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 5.)),
+                v2.Grayscale(num_output_channels=3),
+                v2.ToDtype(torch.float, scale=True)
             ]
-            if self.video_transform is not None:
-                if self.video_transform.do_normalize:
-                    augmentations.append(
-                        v2.Normalize(mean=self.video_transform.image_mean,
-                                     std=self.video_transform.image_std)
-                    )
+            #            if self.video_transform is not None:
+            #                if self.video_transform.do_normalize:
+            #                    augmentations.append(
+            #
+            #                    )
             self._augment = v2.Compose(augmentations)
         return self._augment
+
 
     def finish_processing(self, vals):
         return {'pixel_values': vals['pixel_values'],
@@ -412,14 +432,16 @@ class PPAnEvalDataset(BaseDataset):
         if self._augment is None:
             augmentations = [
                 v2.UniformTemporalSubsample(self.temporal_res_frames),
-                v2.ToDtype(torch.float, scale=True),
+                v2.Grayscale(num_output_channels=3),
+                v2.ToDtype(torch.float, scale=True)
             ]
-            if self.video_transform is not None:
-                if self.video_transform.do_normalize:
-                    augmentations.append(
-                        v2.Normalize(mean=self.video_transform.image_mean,
-                                     std=self.video_transform.image_std)
-                    )
+            # This is commented out because we don't use it for greyscale
+#            if self.video_transform is not None:
+#                if self.video_transform.do_normalize:
+#                    augmentations.append(
+#                        v2.Normalize(mean=self.video_transform.image_mean,
+#                                     std=self.video_transform.image_std)
+#                    )
             self._augment = v2.Compose(augmentations)
         return self._augment
 
@@ -446,7 +468,7 @@ class PPAnEvalDataset(BaseDataset):
             random_shuffle=False,
             initial_fill=2,
             name=f"VideoReader",
-            step=1,
+            step=self.step,
             file_list_include_preceding_frame=True,
         )
 
@@ -471,6 +493,7 @@ def load_rach3(root: PathLike):
     with open(bbs_path, "r") as f:
         bbs = json.load(f)
     bbs = {i["session_id"]: i["box"] for i in bbs}
+
     return (load_rach3_split(test, bbs, False),
             load_rach3_split(train, bbs, True))
 
@@ -508,11 +531,10 @@ def load_rach3_split(root: PathLike,
                                         crops,
                                         [False for _ in range(len(crops))],
                                         [augment for _ in range(len(crops))])]
-
     return samples
 
 
-def load_pianoyt(root: PathLike):
+def load_pianoyt(root: PathLike) -> TEST_TRAIN_SPLIT:
     data = []
     with open(os.path.join(root, "dataset.csv"), "r") as f:
         reader = csv.reader(f)
@@ -536,7 +558,7 @@ def load_pianoyt(root: PathLike):
     return samples_test, samples_train
 
 
-def load_miditest(root):
+def load_miditest(root) -> list[SAMPLE_TYPE]:
     midi_root = os.path.join(root, "miditest_MIDI")
     midi_files = os.listdir(midi_root)
     midi_files = [os.path.join(midi_root, i) for i in midi_files]
@@ -572,3 +594,76 @@ def load_all_data(rach3_dir: Optional[PathLike],
         miditest = load_miditest(miditest_dir)
 
     return test, train, miditest, pianoyt_test, rach3_test
+
+
+def calculate_bounding_boxes(samples, yolo_model_checkpoint) -> list[SAMPLE_TYPE]:
+    """
+    Get bounding box predictions for a list of samples.
+    Utilizes the Ultralytics package.
+
+    Parameters
+    ----------
+    samples : list[ppan.dataset.SAMPLE_TYPE]
+    yolo_model_checkpoint : PathLike
+
+    Returns
+    -------
+    samples : ppan.dataset.SAMPLE_TYPE
+        The same samples as passed in but with bounding boxes added.
+    """
+    # Load the model
+    model = YOLO(yolo_model_checkpoint)
+
+    new_samples = []
+    for sample in tqdm(samples, desc="Calculating Bounding Boxes"):
+        sample_preds = []
+        video = sample[2]
+        pred = model.predict(source=str(video), stream=True,
+                             verbose=False, vid_stride=5)
+        # Get predictions over the first 10 seconds.
+        [sample_preds.append(next(pred)) for _ in range(5*10)]
+
+        filtered_session_preds = [
+            i for i in sample_preds if i.boxes.conf.shape[0] > 0
+        ]
+        best_pred = max(filtered_session_preds, key=lambda x: x.boxes.conf[0])
+        bb_meta = json.loads(best_pred.tojson())[0]['box']
+        bb = (round(bb_meta["y1"]), round(bb_meta["y2"]),
+              round(bb_meta["x1"]), round(bb_meta["x2"]))
+        new_sample = [i for i in sample]
+        new_sample[3] = bb
+        new_samples.append(new_sample)
+    return new_samples
+
+
+def load_omaps(root: PathLike) -> TEST_TRAIN_SPLIT:
+    """
+    Load all samples for the OMAPS dataset for use with PPAN.
+
+    Returns
+    -------
+    samples : list[SAMPLE_TYPE]
+    """
+    test_dir = os.path.join(root, "test")
+#    train_dir = os.path.join(root, "train")
+
+    return _load_omaps_split(test_dir), None# _load_omaps_split(train_dir)
+
+
+def _load_omaps_split(root: PathLike) -> list[SAMPLE_TYPE]:
+    """Load a train or test split for the OMAPS dataset.
+    """
+    videos = [os.path.join(root, i) for i in
+              sorted(glob.glob("*.mp4", root_dir=root))]
+    labels = [os.path.join(root, i) for i in
+              sorted(glob.glob("*.txt", root_dir=root))]
+    none = [None for _ in videos]
+    true = [True for _ in videos]
+    false = [False for _ in videos]
+    samples = list(zip(none, none, videos, none, true, false, labels))
+#    samples = calculate_bounding_boxes(
+#        samples,
+#        "./model_weights/piano-detector-yolov8s.pt"
+#    )
+    return samples
+

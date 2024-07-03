@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=GPU
-#SBATCH --job-name=ppan_train
+#SBATCH --job-name=bw_test
 #SBATCH --nodes=1
-#SBATCH --nodelist=gpu004
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --time=06:00:00
