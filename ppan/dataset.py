@@ -400,7 +400,6 @@ class PPAnTrainDataset(BaseDataset):
             self._augment = v2.Compose(augmentations)
         return self._augment
 
-
     def finish_processing(self, vals):
         return {'pixel_values': vals['pixel_values'],
                 'labels': vals['note_vec']}

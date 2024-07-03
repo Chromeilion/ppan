@@ -12,7 +12,7 @@ mir_eval==0.7
 python-dotenv==1.0.1
 torch==2.3.1
 pillow==10.4.0
-nvidia-dali-cuda120==1.36.0
+nvidia-dali-cuda120==1.39.0
 wandb==0.17.3
 accelerate==0.31.0
 moviepy

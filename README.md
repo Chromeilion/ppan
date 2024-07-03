@@ -28,3 +28,10 @@ To see how the model can be trained using accelerate, have a look at
 PPAN can be configured by using environment variables or a .env file. To 
 see all available environment variables have a look at ```__main__.py```.
 All variables can also be passed as command line arguments.
+
+## Important Notes
+To speed up data loading PPAN utilizes a cache file. If you change the 
+seed/dataset and are running into index errors, deleting the cache files
+(one per dataset, e.g train/test) should fix it.
+On first run, PPAN may take some time to create the cache files, however 
+this is only done once.
