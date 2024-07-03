@@ -272,8 +272,8 @@ class BaseDataset(IterableDataset):
             crop = torch.tensor(crop)
             if random_resize:
                 # Randomly resize the crop as an augmentation
-                rand_am = torch.randint(-20, 10, [2])
-                rand_am2 = torch.randint(-20, 10, [2])
+                rand_am = torch.randint(-10, 5, [2])
+                rand_am2 = torch.randint(-10, 5, [2])
                 crop[[1, 3]] += rand_am
                 crop[[0, 2]] -= rand_am2
 

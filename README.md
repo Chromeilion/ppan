@@ -2,7 +2,8 @@
 PPAN is a model for automatic onset detection from video.
 
 ## Installing
-Make sure Cython is installed, then, from the repo root, simply run: 
+Make sure Cython is installed and that you're using python <= 3.11. 
+Then, from the repo root, simply run: 
 ```shell
 pip install .
 ```
@@ -20,6 +21,8 @@ Because PPAN is built using the Huggingface library, one can easily use
 accelerate to do multi-gpu training. PPAN additionally logs training 
 statistics to Weights & Biases, so if you'd like to run training you 
 will need an account set up.
+To see how the model can be trained using accelerate, have a look at 
+```train_script.sh```.
 
 ### Configuring
 PPAN can be configured by using environment variables or a .env file. To 

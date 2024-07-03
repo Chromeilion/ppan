@@ -45,10 +45,10 @@ class WandbPredictionProgressCallback(WandbCallback):
         img_mean = torch.tensor(val_dataset.video_transform.image_mean)
         img_std = torch.tensor(val_dataset.video_transform.image_std)
         self.unnormalize = v2.Compose([
-            v2.Normalize(
-                mean=-img_mean / img_std,
-                std=1 / img_std
-            ),
+#            v2.Normalize(
+#                mean=-img_mean / img_std,
+#                std=1 / img_std
+#            ),
             v2.ToDtype(torch.uint8, scale=True)
         ])
         self.imgs = self.unnormalize(torch.cat(
