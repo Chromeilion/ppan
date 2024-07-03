@@ -26,8 +26,9 @@ To see how the model can be trained using accelerate, have a look at
 
 ### Configuring
 PPAN can be configured by using environment variables or a .env file. To 
-see all available environment variables have a look at ```__main__.py```.
-All variables can also be passed as command line arguments.
+see all available environment variables have a look at ```__main__.py``` 
+and env.example. All variables can also be passed as command line 
+arguments.
 
 ## Important Notes
 To speed up data loading PPAN utilizes a cache file. If you change the 
