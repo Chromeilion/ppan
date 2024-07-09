@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import torch
 import torchvision.transforms.v2 as v2
@@ -44,13 +45,16 @@ class WandbPredictionProgressCallback(WandbCallback):
              for key, val in i.items()} for i in self.sample_dataset]
         img_mean = torch.tensor(val_dataset.video_transform.image_mean)
         img_std = torch.tensor(val_dataset.video_transform.image_std)
-        self.unnormalize = v2.Compose([
-#            v2.Normalize(
-#                mean=-img_mean / img_std,
-#                std=1 / img_std
-#            ),
-            v2.ToDtype(torch.uint8, scale=True)
-        ])
+        self.unnormalize = []
+        if os.environ.get("PPAN_AUG_GREYSCALE", "True") == "False":
+            self.unnormalize.append(
+                v2.Normalize(
+                    mean=-img_mean / img_std,
+                    std=1 / img_std
+                )
+            )
+        self.unnormalize += [v2.ToDtype(torch.uint8, scale=True)]
+        self.unnormalize = v2.Compose(self.unnormalize)
         self.imgs = self.unnormalize(torch.cat(
             [i["pixel_values"] for i in self.sample_dataset],
             dim=0

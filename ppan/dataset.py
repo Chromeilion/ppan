@@ -120,6 +120,12 @@ class BaseDataset(IterableDataset):
         self.midi_cache: dict[int, PPAnMidi] = {}
 
         self._augment = None
+        r_resize_int = os.environ.get(
+            "PPAN_AUG_CROP_JITTER", None)
+        if r_resize_int is not None:
+            r_resize_int = tuple([int(i) for i in r_resize_int.split(":")])
+        self.rand_resize_interval: Optional[tuple[int, int]] = r_resize_int
+        self.do_stack: bool = os.environ.get("PPAN_AUG_STACK", "True") == "True"
         self.dali_iter = self.get_iter()
 
         if target_epoch is not None:
@@ -272,10 +278,15 @@ class BaseDataset(IterableDataset):
             crop = torch.tensor(crop)
             if random_resize:
                 # Randomly resize the crop as an augmentation
-                rand_am = torch.randint(-10, 5, [2])
-                rand_am2 = torch.randint(-10, 5, [2])
-                crop[[1, 3]] += rand_am
-                crop[[0, 2]] -= rand_am2
+                rand_am = torch.randint(
+                    self.rand_resize_interval[0],
+                    self.rand_resize_interval[1],
+                    [4]
+                )
+                # We either have to subtract or add depending on whether
+                # it's the left edge, right edge, top edge or bottom edge.
+                crop[[1, 3]] += rand_am[:2]
+                crop[[0, 2]] -= rand_am[2:]
 
             box = tv_tensors.BoundingBoxes(
                 torch.tensor([crop[0], crop[2], crop[1], crop[3]]),
@@ -283,6 +294,19 @@ class BaseDataset(IterableDataset):
                 canvas_size=video.shape[2:]
             )
             video = self.do_crop(video, box)
+
+        if self.do_stack:
+            video = functional.resize(
+                video,
+                [self.video_transform.crop_size["height"] // 2,
+                 self.video_transform.crop_size["width"] * 2]
+            )
+        else:
+            video = functional.resize(
+                video,
+                [self.video_transform.crop_size["height"],
+                 self.video_transform.crop_size["width"]]
+            )
 
         # Rotate the video into the correct orientation.
         if rotate_180:
@@ -294,25 +318,16 @@ class BaseDataset(IterableDataset):
         except IndexError:
             pass
 
-        # Wrap the rectangle such that it fits into a square better.
-        vid_size = list(video.size())
-        vid_size[-2] = vid_size[-2] * 2
-        vid_size[-1] = vid_size[-1] // 2
-        wrapped = torch.zeros(size=vid_size, dtype=video.dtype).to(video.device)
-        wrapped[..., :video.shape[-2], :] = video[..., :vid_size[-1]]
-        wrapped[..., video.shape[-2]:, :] = video[..., vid_size[-1]:vid_size[-1]*2]
-        video = wrapped
+        if self.do_stack:
+            # Wrap the rectangle such that it fits into a square better.
+            vid_size = list(video.size())
+            vid_size[-2] = vid_size[-2] * 2
+            vid_size[-1] = vid_size[-1] // 2
+            wrapped = torch.zeros(size=vid_size, dtype=video.dtype).to(video.device)
+            wrapped[..., :video.shape[-2], :] = video[..., :vid_size[-1]]
+            wrapped[..., video.shape[-2]:, :] = video[..., vid_size[-1]:vid_size[-1]*2]
+            video = wrapped
 
-#        video = self._pad_to_square(video)
-
-        # Although we apply the model transformation later (which includes
-        # a resize), we resize here in order to reduce the amount of used
-        # memory and speed up augmentations.
-        video = functional.resize(
-            video,
-            [self.video_transform.crop_size["height"],
-             self.video_transform.crop_size["width"]]
-        )
         # Apply augmentations to the cropped video
         video = self.augmentations(video)
 
@@ -368,36 +383,36 @@ class BaseDataset(IterableDataset):
         )
         return video, label, note_vec, timestamps
 
+    def _get_color_augmentation(self):
+        if os.environ.get("PPAN_AUG_GREYSCALE", "True") == "False":
+            if self.video_transform is not None:
+                if self.video_transform.do_normalize:
+                    return v2.Normalize(mean=self.video_transform.image_mean,
+                                        std=self.video_transform.image_std)
+        else:
+            return v2.Grayscale(num_output_channels=3)
+
 
 class PPAnTrainDataset(BaseDataset):
     """
     Dataset object for training on a video/midi dataset such as Rach3.
     Handles loading, preprocessing, and batching all necessary files.
     """
+    BRIGHTNESS_JITTER = 0.01
+    GAUSSIAN_MEAN = 0
+    GAUSSIAN_STDDEV = 0.01
+
     @property
     def augmentations(self):
         if self._augment is None:
-            augmentations = [
-                v2.UniformTemporalSubsample(self.temporal_res_frames),
+            self._augment = v2.Compose([
+                v2.ToDtype(torch.float, scale=True),
                 v2.RandomApply([
-                    v2.ColorJitter(hue=0.1,
-                                   brightness=0.15,
-                                   contrast=0.1,
-                                   saturation=0.1)
-                ],
-                    p=0.25
-                ),
-                v2.RandomPerspective(distortion_scale=0.1, p=0.25),
-                v2.GaussianBlur(kernel_size=(3, 3), sigma=(0.1, 5.)),
-                v2.Grayscale(num_output_channels=3),
-                v2.ToDtype(torch.float, scale=True)
-            ]
-            #            if self.video_transform is not None:
-            #                if self.video_transform.do_normalize:
-            #                    augmentations.append(
-            #
-            #                    )
-            self._augment = v2.Compose(augmentations)
+                    v2.ColorJitter(brightness=self.BRIGHTNESS_JITTER),
+                    v2.GaussianNoise(mean=self.GAUSSIAN_MEAN,
+                                     sigma=self.GAUSSIAN_STDDEV),
+                ], p=0.4),
+                self._get_color_augmentation()])
         return self._augment
 
     def finish_processing(self, vals):
@@ -429,19 +444,8 @@ class PPAnEvalDataset(BaseDataset):
     @property
     def augmentations(self):
         if self._augment is None:
-            augmentations = [
-                v2.UniformTemporalSubsample(self.temporal_res_frames),
-                v2.Grayscale(num_output_channels=3),
-                v2.ToDtype(torch.float, scale=True)
-            ]
-            # This is commented out because we don't use it for greyscale
-#            if self.video_transform is not None:
-#                if self.video_transform.do_normalize:
-#                    augmentations.append(
-#                        v2.Normalize(mean=self.video_transform.image_mean,
-#                                     std=self.video_transform.image_std)
-#                    )
-            self._augment = v2.Compose(augmentations)
+            self._augment = v2.Compose([v2.ToDtype(torch.float, scale=True),
+                                        self._get_color_augmentation()])
         return self._augment
 
     def finish_processing(self, vals):
@@ -507,6 +511,7 @@ def load_rach3_split(root: PathLike,
     ----------
     root : PathLike
     bbs : dict
+    augment : bool
 
     Returns
     -------
