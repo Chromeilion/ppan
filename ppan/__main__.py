@@ -20,7 +20,7 @@ def main():
     datasets = ["rach3", "pianoyt", "miditest"]
     dataset_dir_args = [[f"--{i}-dir"] for i in datasets]
     dataset_dir_kwargs = [{
-        "default": os.environ.get(f"PPAN_{i.upper()}_DIR"),
+        "default": os.environ.get(f"PPAN_{i.upper()}_DIR", None),
         "action": "store",
         "help": f"Path to {i} dataset",
         "required": False

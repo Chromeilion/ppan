@@ -570,9 +570,9 @@ def load_miditest(root) -> list[SAMPLE_TYPE]:
     return list(zip(midi_files, none, videos, none, true, false))
 
 
-def load_all_data(rach3_dir: Optional[PathLike],
-                  pianoyt_dir: Optional[PathLike],
-                  miditest_dir: Optional[PathLike]):
+def load_all_data(rach3_dir: Optional[PathLike] = None,
+                  pianoyt_dir: Optional[PathLike] = None,
+                  miditest_dir: Optional[PathLike] = None):
     """Load Rach3, pianoYT, and Miditest and put them into train, test and
     validation splits.
     """
