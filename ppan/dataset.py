@@ -250,7 +250,7 @@ class BaseDataset(IterableDataset):
                 device=label.device,
                 dtype=torch.float
             )
-            notes_vec = (notes_vec_1 + notes_vec_2) / 2
+            notes_vec = torch.logical_or(notes_vec_1, notes_vec_2).float()
         # If the number of frames is odd, we can just use the middle one.
         else:
             time = timestamps[timestamps.shape[0] // 2]
