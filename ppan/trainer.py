@@ -30,7 +30,6 @@ class PPAnTrainer(Trainer):
                 weight = torch.tensor(88.).to(logits.device)
             else:
                 weight = (torch.numel(labels)-pos)/pos
-            print(weight.item())
             loss_fct = nn.BCEWithLogitsLoss(
                 pos_weight=weight
             )
