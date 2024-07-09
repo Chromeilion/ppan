@@ -27,7 +27,7 @@ class PPAnMidi:
     PIANO_SHIFT = 21
 
     def __init__(self, vid_len: float, temporal_res: float,
-                 lenience: int, percentage_negative: float = 0.05):
+                 lenience: int, percentage_negative: float = 0.01):
 
         self.midi_filepath = None
         self._performance = None

@@ -1,5 +1,6 @@
 from typing import Optional
 
+import torch
 from torch import nn
 from torch import tensor
 from transformers import Trainer
@@ -24,7 +25,15 @@ class PPAnTrainer(Trainer):
             loss_fct = nn.BCEWithLogitsLoss(
                 pos_weight=self.weight.to(logits.device))
         else:
-            loss_fct = nn.BCEWithLogitsLoss()
+            pos = torch.sum(labels)
+            if pos < 1:
+                weight = torch.tensor(88.).to(logits.device)
+            else:
+                weight = (torch.numel(labels)-pos)/pos
+            print(weight.item())
+            loss_fct = nn.BCEWithLogitsLoss(
+                pos_weight=weight
+            )
 
         loss = loss_fct(logits, labels)
         return (loss, outputs) if return_outputs else loss
