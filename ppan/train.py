@@ -61,10 +61,6 @@ def train(rach3_dir: PathLike,
         adam_beta2 = 0.999
 
     load_dotenv()
-    no_gpu = int(os.environ.get("PPAN_NO_GPU", 1))
-    # Use the linear scaling rule to calculate the lr, more info here:
-    # https://arxiv.org/abs/1706.02677
-#    lr = (learning_rate * batch_size * no_gpu) / 256.
     lr = learning_rate
 
     test_samples, train_samples, _, _, _ = load_all_data(

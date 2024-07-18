@@ -26,7 +26,7 @@ class PPAnMidi:
     NOTES_IN_OCTAVE = len(NOTES)
     PIANO_SHIFT = 21
 
-    def __init__(self, vid_len: float, temporal_res: float,
+    def __init__(self, n_frames: int, temporal_res: float,
                  lenience: int, percentage_negative: float = 0.01):
 
         self.midi_filepath = None
@@ -44,27 +44,32 @@ class PPAnMidi:
         self._oo_array = None
         self.temporal_res = temporal_res
         self.lenience = lenience
-        self.vid_len = vid_len
+        self.n_frames = n_frames
 
     @property
     def oo_array(self) -> npt.NDArray[np.bool_]:
         if self._oo_array is None:
             _oo_array = np.zeros(shape=(num_labels,
-                                        int(self.vid_len//self.temporal_res)),
+                                        self.n_frames),
                                  dtype=np.bool_)
             for note in self.performance.performedparts[0].notes:
-                note_on_frame = int(note['note_on']//self.temporal_res)
+                note_on_frame = round(note['note_on'] / self.temporal_res)
                 _oo_array[
-                    note['midi_pitch']-self.PIANO_SHIFT,
-                    note_on_frame-self.lenience:note_on_frame+self.lenience+1
+                note['midi_pitch'] - self.PIANO_SHIFT,
+                note_on_frame - self.lenience:note_on_frame + self.lenience + 1
                 ] = 1
             self._oo_array = _oo_array
-
         return self._oo_array
 
-    def __call__(self, time: float, device: torch.device, dtype: torch.dtype):
-        return torch.tensor(self.oo_array[:, int(time//self.temporal_res)],
-                            device=device, dtype=dtype)
+    def __call__(self, time: float | int, device: torch.device,
+                 dtype: torch.dtype):
+        if isinstance(time, float):
+            return torch.tensor(
+                self.oo_array[:, int(time // self.temporal_res)],
+                device=device, dtype=dtype)
+        else:
+            return torch.tensor(self.oo_array[:, time],
+                                device=device, dtype=dtype)
 
     def number_to_note(self, number: int) -> str:
         octave = number // self.notes_in_octave
@@ -137,51 +142,88 @@ class PPAnMidi:
                 ).toarray().astype(bool)
         return self._pianoroll
 
-    def generate_filelist_labs(self, name, lab, pad: float) -> str:
-        threshold_mask = self.oo_array.max(0) > 0.001
+    def generate_filelist_labs(self, name, lab, pad: int) -> str:
+        threshold_mask = self.oo_array.max(0)
         non_zero = np.where(threshold_mask)[0]
         zero = np.where(~threshold_mask)[0]
         res_list_pos = self._segment(name, lab, non_zero)
         res_list_neg = self._segment(name, lab, zero)
-        total_time_pos = sum([j-i for _, _, i, j in res_list_pos])
-        res_list_neg = self._rebalance(total_time_pos*self.percentage_negative,
-                                       res_list_neg)
-
-        final_list = res_list_neg + res_list_pos
+        total_no_frames = sum([j - i for _, _, i, j in res_list_pos])
+        res_list_neg = self._rebalance(
+            int(total_no_frames * self.percentage_negative),
+            res_list_neg, min_no_frames=1)
+        full_list = res_list_neg + res_list_pos
+        full_list.sort(key=lambda x: (x[0], x[2]))
+        # Merge potentially overlapping sections
+        # This will only merge neighbouring negative and positive sections, as
+        # those may have no distance between them.
+#        final_list = []
+#        first_item = full_list[0]
+#        prev_item = full_list[0]
+#        for i in full_list[1:]:
+#            if i[0] == prev_item[0] and prev_item[3] - i[2] >= 0:
+#                prev_item = i
+#                continue
+#            item = [
+#                first_item[0], first_item[1], first_item[2], prev_item[3]
+#            ]
+#            final_list.append(item)
+#            first_item = i
+#            prev_item = i
+#
+#        if first_item != prev_item:
+#            final_list.append(
+#                [first_item[0], first_item[1], first_item[2], prev_item[3]])
+        # Apply the padding.
         final_list = [
-            (filename, lab, max(start-pad, 0),
-             min(end+pad, self.oo_array.shape[1]*self.temporal_res)) for
-            filename, lab, start, end in final_list
+            (filename, lab, max(start - pad, 0),
+             min(end + pad, self.oo_array.shape[1])) for
+            filename, lab, start, end in full_list
         ]
+        final_list = [i for i in final_list if i[3] - i[2] >= pad+1+pad]
         return "\n".join([" ".join([str(j) for j in i]) for i in final_list])
 
     @staticmethod
-    def _rebalance(max_time: float, old_list: list) -> list:
+    def _rebalance(max_frames: float, old_list: list,
+                   min_no_frames: int) -> list:
         new_list = []
-        total_time = 0
-        while total_time < max_time:
-            new_element = choice(
-                [i for i in old_list if i not in new_list]
-            )
-            total_time += new_element[3] - new_element[2]
-            new_list.append(new_element)
+        total_frames = 0
+        while total_frames < max_frames:
+            possible_choices = [
+                i for i in old_list if i not in new_list and
+                                       i[3] - i[2] >= min_no_frames
+            ]
+            if not possible_choices:
+                break
+            new_element = choice(possible_choices)
+            total_frames += new_element[3] - new_element[2]
+            new_list.append(list(new_element))
 
+        # If we've added too much, we now shrink the sections
+        while total_frames > (max_frames+min_no_frames):
+            possible_idxs = []
+            for i in range(len(new_list)):
+                if new_list[i][3] - new_list[i][2] > min_no_frames:
+                    possible_idxs.append(i)
+            if choice([True, False]):
+                new_list[choice(possible_idxs)][2] += 1
+            else:
+                new_list[choice(possible_idxs)][3] -= 1
+            total_frames -= 1
         return new_list
 
     def _segment(self, name, lab, mask):
-        non_zero_r = np.roll(mask, -1)
-        shift_array = np.where(non_zero_r - mask > 1)[0]
-        res_list = []
-        prev_idx = 0
-        for current_idx in shift_array:
-            time_start = mask[prev_idx] * self.temporal_res
-            time_end = mask[current_idx] * self.temporal_res
-            # Windows that aren't even a single frame are too small.
-            if time_start == time_end:
+        segments = []
+        segment_size = 1
+        for i in range(1, len(mask)):
+            if mask[i-1] == mask[i] + 1:
+                segment_size += 1
+                print("Hit")
                 continue
-            res_list.append((name, lab, time_start, time_end))
-            prev_idx = current_idx+1
-        return res_list
+            segments.append((name, lab, mask[i-segment_size],
+                             mask[i-1]+1))
+            segment_size = 1
+        return segments
 
     def pianoroll_window(self, timestamps: Tuple[float, float]):
         """

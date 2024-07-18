@@ -4,7 +4,9 @@ import os
 from dotenv import load_dotenv
 
 from ppan.evaluate_model import evaluate
-from ppan.train import train as train
+from ppan.train import train
+from ppan.pretrain import pretrain
+from ppan.render_dataset import process
 
 
 def main():
@@ -164,6 +166,134 @@ def main():
     )
     parser_train.set_defaults(func=train)
 
+    parser_pretrain = subparsers.add_parser(
+        "pretrain",
+        help="Pre-Train the network on some data."
+    )
+    parser_pretrain.add_argument(
+        "-d", "--dataset-dir",
+        action="store",
+        default=os.environ.get("PPAN_PROCESSED_DATASET_DIR"),
+        help="Location of the processed dataset to train from.",
+        required=False,
+    )
+    parser_pretrain.add_argument(
+        "-o", "--output-dir",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_OUTPUT_DIR"),
+        help="Where to save the trained model, full path with filename.",
+        required=False,
+    )
+    parser_pretrain.add_argument(
+        "-r", "--checkpoint-dir",
+        action="store",
+        help="Location of a training checkpoint when continuing training.",
+        default=os.environ.get("PPAN_PRETRAIN_MODEL_CHECKPOINT", None),
+        required=False,
+    )
+    parser_pretrain.add_argument(
+        "--no-epochs",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_NO_EPOCHS", None),
+        type=int,
+        help="Number of epochs to train for",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--eval-every",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_EVAL_EVERY", None),
+        type=int,
+        help="How often to run the evaluation while training (in steps)",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--save-every",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_SAVE_EVERY", None),
+        type=int,
+        help="How often to save the model while training (in steps)",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--batch-size",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_BATCH_SIZE", None),
+        type=int,
+        help="Batch size to use when training",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--max-iters-per-epoch-test",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_MAX_ITERS_PER_EPOCH_TEST", None),
+        type=int,
+        help="Maximum amount of iterations per test epoch, for when you "
+             "dont want to iterate through the entire test dataset every "
+             "time validation is run.",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--max-iters-per-epoch-train",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_MAX_ITERS_PER_EPOCH_TRAIN", None),
+        type=int,
+        help="Maximum amount of iterations per train epoch, for when you dont "
+             "want to iterate through the entire train dataset every epoch.",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "-lr", "--learning-rate",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_LR", None),
+        type=float,
+        help="The learning rate with which to train.",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--weight-decay",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_WEIGHT_DECAY", None),
+        type=float,
+        help="Weight decay to use with the AdamW optimizer.",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--warmup-ratio",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_WARMUP_RATIO", None),
+        type=float,
+        help="Percentage (0-1) of training samples to dedicate to the warmup "
+             "phase of the lr scheduler.",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--scheduler-type",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_SCHEDULER_TYPE", None),
+        type=str,
+        help="What type of lr scheduler to use. Must be supported by the "
+             "huggingface trainer. Default is cosine.",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--adam-beta1",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_ADAM_BETA1", None),
+        type=float,
+        help="Adam optimizer beta1 parameter.",
+        required=False
+    )
+    parser_pretrain.add_argument(
+        "--adam-beta2",
+        action="store",
+        default=os.environ.get("PPAN_PRETRAIN_ADAM_BETA2", None),
+        type=float,
+        help="Adam optimizer beta2 parameter.",
+        required=False
+    )
+    parser_pretrain.set_defaults(func=pretrain)
+
     parser_eval = subparsers.add_parser(
         "evaluate",
         help="Run inference using a trained model, calculate MIR statistics, "
@@ -202,6 +332,23 @@ def main():
         required=False,
     )
     parser_eval.set_defaults(func=evaluate)
+
+    parser_process = subparsers.add_parser(
+        "process",
+        help="Process the dataset into a more convenient format."
+    )
+    [parser_process.add_argument(
+        *i,
+        **j
+    ) for i, j in zip(dataset_dir_args, dataset_dir_kwargs)]
+    parser_process.add_argument(
+        "-o", "--output-dir",
+        action="store",
+        default=os.environ.get("PPAN_RENDER_OUTPUT_DIR", None),
+        help="Directory to store the processed dataset",
+        required=False,
+    )
+    parser_process.set_defaults(func=process)
 
     args = parser.parse_args()
     args.func(**vars(args))

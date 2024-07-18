@@ -22,8 +22,9 @@ from transformers import (
 )
 
 from ppan.config import pretrained_model, fps, temporal_res, device
-from ppan.dataset import load_all_data, load_omaps, PPAnEvalDataset
+from ppan.dataset import load_all_data, load_omaps
 from ppan.midi import PPAnMidi
+from ppan.preprocessor import PPAnEvalDataset
 
 PathLike = Union[str, bytes, os.PathLike]
 
