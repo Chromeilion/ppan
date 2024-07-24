@@ -249,3 +249,4 @@ train_cache.txt
 midi_preds/
 wanb/
 accelerate_config.yaml
+*.xml
