@@ -1,13 +1,25 @@
-#!/bin/bash
 #SBATCH --partition=GPU
-#SBATCH --job-name=ppan_eval
+#SBATCH --job-name=bw_test
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --time=06:00:00
-#SBATCH --output=./logs/ppan_eval%j.out
+#SBATCH --output=./logs/run%j.out
 #SBATCH --exclusive
+
+# --------------------------------------------------------------------
+# A script for installing and running PPAN in a Python virtualenv with
+# Accelerate. A specific PPAN subcommand must be provided as an argument
+# (pretrain, evaluate, finetune, etc.)
+# The actual PPAN parameters can be controlled through environment variables.
+# --------------------------------------------------------------------
+
+# Load .env file
 set -a; source .env; set +a
+
+if [ $# -ne 1 ]; then
+  echo "Please specify the PPAN subcommand to run as an argument"
+fi
 
 # Add our ffmpeg binary to the path since it's not installed system-wide.
 export PATH=$PPAN_FFMPEG_LOC:$PATH
@@ -22,18 +34,6 @@ fi
 
 module load cuda
 
-# Let's compile our own Python to make sure we have everything we need.
-PYTHON_VERSION=3.11.7
-if ! [ -d "./Python-$PYTHON_VERSION/" ]; then
-  wget https://www.python.org/ftp/python/$PYTHON_VERSION/Python-$PYTHON_VERSION.tgz
-  tar -xzf Python-$PYTHON_VERSION.tgz
-fi
-
-cd Python-$PYTHON_VERSION/ || exit
-./configure --enable-optimizations CC="gcc -pthread" CXX="g++ -pthread"
-make -j 24
-cd ..
-
 # It's very important to recreate the virtualenv every time the job
 # starts, as we want to guarantee that all our modules are correctly
 # installed on the current node we're running on.
@@ -41,7 +41,7 @@ if [ -d "./venv" ]; then
   rm -r ./.venv
 fi
 
-python3 -m virtualenv --python="Python-$PYTHON_VERSION/python" .venv
+"$PPAN_PYTHON_PREFIX"/bin/python3 -m virtualenv .venv
 
 source ./.venv/bin/activate
 
@@ -54,10 +54,9 @@ pip install pybind11
 pip install Cython
 pip install numpy
 pip install git+https://github.com/CPJKU/madmom
-pip install -r requirements.txt
-pip install .
-accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" ppan evaluate
+pip install git+https://github.com/Chromeilion/ppan.git
+
+accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" ppan "$1"
 
 # Clean up the virtualenv after we're done
 rm -r ./.venv
-
