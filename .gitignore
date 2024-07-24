@@ -206,6 +206,8 @@ cmake-build-*/
 # IntelliJ
 out/
 
+.idea
+
 # mpeltonen/sbt-idea plugin
 .idea_modules/
 
@@ -249,3 +251,4 @@ train_cache.txt
 midi_preds/
 wanb/
 accelerate_config.yaml
+*.xml
