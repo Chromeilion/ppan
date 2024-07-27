@@ -154,26 +154,6 @@ class PPAnMidi:
             res_list_neg, min_no_frames=1)
         full_list = res_list_neg + res_list_pos
         full_list.sort(key=lambda x: (x[0], x[2]))
-        # Merge potentially overlapping sections
-        # This will only merge neighbouring negative and positive sections, as
-        # those may have no distance between them.
-#        final_list = []
-#        first_item = full_list[0]
-#        prev_item = full_list[0]
-#        for i in full_list[1:]:
-#            if i[0] == prev_item[0] and prev_item[3] - i[2] >= 0:
-#                prev_item = i
-#                continue
-#            item = [
-#                first_item[0], first_item[1], first_item[2], prev_item[3]
-#            ]
-#            final_list.append(item)
-#            first_item = i
-#            prev_item = i
-#
-#        if first_item != prev_item:
-#            final_list.append(
-#                [first_item[0], first_item[1], first_item[2], prev_item[3]])
         # Apply the padding.
         final_list = [
             (filename, lab, max(start - pad, 0),
@@ -224,74 +204,3 @@ class PPAnMidi:
                              mask[i-1]+1))
             segment_size = 1
         return segments
-
-    def pianoroll_window(self, timestamps: Tuple[float, float]):
-        """
-        Extract a window from the midi pianoroll given start and end times and
-        return it as an array.
-
-        Parameters
-        ----------
-        timestamps : Tuple[float, float]
-
-        Returns
-        -------
-        pianoroll_window : npt.NDArray
-        """
-        start = int(timestamps[0] / (1 / self.time_div))
-        end = int(timestamps[1] / (1 / self.time_div))
-
-        return self.pianoroll[:, start:end]
-
-    def midi_to_notes(self,
-                      timestamps: Tuple[float, float]) -> npt.NDArray[int]:
-        """
-        Generate a vector slice of all notes played between two timestamps.
-
-        Parameters
-        ----------
-        timestamps : Tuple[float, float]
-            start and end of the window in seconds
-
-        Returns
-        -------
-        note_vec : npt.NDArray
-        """
-        notes = np.array([
-            i['midi_pitch'] for i in self.performance[0].notes if
-            timestamps[1] > i['note_on'] > timestamps[0] or
-            i['note_on'] < timestamps[0] < i['note_off']
-        ]) - self.piano_shift
-        if any(notes > 87) or any(notes < 0):
-            raise AttributeError("The note array seems to be invalid")
-        return notes
-
-    def notes_to_sentence(self, notes):
-        """
-        Convert a note_vec to a list of notes as strings.
-
-        Parameters
-        ----------
-        notes : npt.NDArray[int]
-
-        Returns
-        -------
-        notes : List[str]
-        """
-        notes = [self.number_to_note(i) for i in notes]
-        notes = " ".join(notes)
-
-        return notes
-
-    def sentence_to_note_vec(self, sentence: list[str]):
-        note_array = np.zeros(shape=(128, 1), dtype=bool)
-        if not sentence:
-            return note_array
-        elif not sentence[0]:
-            return note_array
-
-        split_sentence = sentence[0].split(" ")
-        notes = [self.note_to_number(i) for i in split_sentence]
-        for i in notes:
-            note_array[i, :] = 1
-        return note_array
