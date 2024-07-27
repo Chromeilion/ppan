@@ -241,7 +241,7 @@ runs/
 # Model checkpoint files
 checkpoints/
 
-idea/
+.idea/
 
 eval.pkl
 mir_stats.json
