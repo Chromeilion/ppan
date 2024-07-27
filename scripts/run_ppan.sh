@@ -54,7 +54,7 @@ pip install pybind11
 pip install Cython
 pip install numpy
 pip install git+https://github.com/CPJKU/madmom
-pip install git+https://github.com/Chromeilion/ppan.git
+pip install "$PPAN_REPO_ROOT"
 
 accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" ppan "$1"
 
