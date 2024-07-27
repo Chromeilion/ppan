@@ -17,7 +17,7 @@ from ppan.config import (seed, num_labels, model_resolution,
                          max_eval_steps, finetune_default)
 from ppan.config import base as model_config
 from ppan.dataset import PPANDataset, BaseVideoProcessor, get_samples
-from ppan.trainer_callbacks import WandbFinetuePredictionProgressCallback
+from ppan.trainer_callbacks import WandbFinetunePredictionProgressCallback
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -122,7 +122,7 @@ def train(dataset_dir: PathLike,
     # Instantiate the WandbPredictionProgressCallback
     # A copy of the dataset is passed so that the state isn't messed up
     # for the Trainer.
-    progress_callback = WandbFinetuePredictionProgressCallback(
+    progress_callback = WandbFinetunePredictionProgressCallback(
         trainer=trainer,
         val_dataset=test_ds
     )

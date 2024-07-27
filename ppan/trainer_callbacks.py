@@ -9,7 +9,7 @@ from PIL import Image
 from ppan.config import num_labels
 
 
-class WandbFinetuePredictionProgressCallback(WandbCallback):
+class WandbFinetunePredictionProgressCallback(WandbCallback):
     """Custom WandbCallback to log model predictions during training.
 
     This callback logs model predictions and labels to a wandb.Table at each
