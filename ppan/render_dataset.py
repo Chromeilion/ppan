@@ -1,20 +1,17 @@
 import os
-from typing import Union
-from random import shuffle
 from pathlib import Path
+from random import shuffle
+from typing import Union
 
-from torchvision.io import write_video
-from torchvision.transforms.v2.functional import resize
 import torch
 import tqdm
 from dotenv import load_dotenv
-from transformers import (
-    VideoMAEImageProcessor,
-)
-from ppan.config import processed_horizontal_res, processed_temporal_size
+from torchvision.io import write_video
+from torchvision.transforms.v2.functional import resize
+
+from ppan.config import processed_temporal_size
 from ppan.dataset import load_all_data
 from ppan.preprocessor import PPAnDatasetProcessor
-
 
 PathLike = Union[str, bytes, os.PathLike]
 

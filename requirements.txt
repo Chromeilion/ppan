@@ -19,3 +19,4 @@ moviepy
 imageio==2.34.2
 ultralytics==8.2.48
 scipy==1.11.3
+av

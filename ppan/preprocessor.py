@@ -1,24 +1,23 @@
 import os
-from typing import Optional, Callable
-from pathlib import Path
 from abc import abstractmethod
-import random
+from pathlib import Path
+from typing import Optional, Callable
 
-from transformers import VideoMAEImageProcessor
-import torch
-from torch.utils.data import IterableDataset
-import torchvision
-import torchvision.transforms.v2 as v2
-import torchvision.transforms.functional as functional
-from torchvision import tv_tensors
 import nvidia.dali.fn as fn
 import nvidia.dali.plugin.pytorch.fn as pfn
+import torch
+import torchvision
+import torchvision.transforms.functional as functional
+import torchvision.transforms.v2 as v2
 from nvidia.dali import pipeline_def
 from nvidia.dali.plugin.pytorch import DALIGenericIterator
 from rach3datautils.utils.multimedia import MultimediaTools
+from torch.utils.data import IterableDataset
+from torchvision import tv_tensors
+from transformers import VideoMAEImageProcessor
 
-from ppan.midi import PPAnMidi
 from ppan.config import seed, SAMPLE_TYPE, processed_horizontal_res
+from ppan.midi import PPAnMidi
 
 
 class BaseDatasetProcessor(IterableDataset):

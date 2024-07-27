@@ -1,17 +1,15 @@
-from pathlib import Path
-import os
-
 import torch
+from torch.utils.data import DataLoader
 import torchvision.transforms.v2 as v2
 import wandb
-from transformers import (Trainer, TrainerCallback, TrainingArguments,
-                          TrainerState, TrainerControl)
+from transformers import Trainer
 from transformers.integrations import WandbCallback
+from PIL import Image
 
 from ppan.config import num_labels
 
 
-class WandbPredictionProgressCallback(WandbCallback):
+class WandbFinetuePredictionProgressCallback(WandbCallback):
     """Custom WandbCallback to log model predictions during training.
 
     This callback logs model predictions and labels to a wandb.Table at each
@@ -36,43 +34,24 @@ class WandbPredictionProgressCallback(WandbCallback):
         """
         super().__init__()
         self.trainer: Trainer = trainer
-        iterator = iter(list(val_dataset))
-        iterator_zero = next(iterator)
-        self.sample_dataset = [next(iterator) for _ in range(num_samples*2)]
-        # move all samples to the same gpu
-        self.sample_dataset = [
-            {key: val.to(iterator_zero[key].device)
-             for key, val in i.items()} for i in self.sample_dataset]
-        img_mean = torch.tensor(val_dataset.video_transform.image_mean)
-        img_std = torch.tensor(val_dataset.video_transform.image_std)
-        self.unnormalize = []
-        if os.environ.get("PPAN_AUG_GREYSCALE", "True") == "False":
-            self.unnormalize.append(
-                v2.Normalize(
-                    mean=-img_mean / img_std,
-                    std=1 / img_std
-                )
-            )
-        self.unnormalize += [v2.ToDtype(torch.uint8, scale=True)]
-        self.unnormalize = v2.Compose(self.unnormalize)
-        self.imgs = self.unnormalize(torch.cat(
-            [i["pixel_values"] for i in self.sample_dataset],
-            dim=0
-        ))
-        self.labs = torch.cat(
-            [i["labels"] for i in self.sample_dataset],
-            dim=0
+        self.sample_dataset = next(iter(DataLoader(
+            val_dataset,
+            batch_size=num_samples,
+            shuffle=True
+        )))
+        self.imgs = v2.functional.grayscale_to_rgb(
+            self.sample_dataset["pixel_values"]
         )
-        self.freq = freq
+        self.labs = self.sample_dataset["label_ids"]
         self.videos_run = False
-        self.preds_table = None
+        self.freq = freq
 
     def add_preds_image(self, logits: torch.Tensor, target: torch.Tensor,
                         lab: str, step: int):
         img_t = v2.functional.resize(target[None, :, None],
-                                     [num_labels, num_labels // 2])
+                                     [num_labels, num_labels // 4])
         img_p = v2.functional.resize(logits[None, :, None],
-                                     [num_labels, num_labels // 2])
+                                     [num_labels, num_labels // 4])
         img_f = torch.cat((img_t, img_p), dim=2)
         self._wandb.log(
             {lab: wandb.Image(img_f)},
@@ -80,7 +59,6 @@ class WandbPredictionProgressCallback(WandbCallback):
         )
 
     def on_evaluate(self, args, state, control, **kwargs):
-        super().on_evaluate(args, state, control, **kwargs)
         if not self.videos_run:
             self._wandb.log(
                 {"Model inputs": wandb.Video(self.imgs.cpu().numpy(),
@@ -91,12 +69,20 @@ class WandbPredictionProgressCallback(WandbCallback):
             self.videos_run = True
 
         if state.global_step % state.eval_steps * self.freq == 0:
+            super().on_evaluate(args, state, control, **kwargs)
             model = kwargs["model"]
             preds = []
             with torch.no_grad():
-                for sample in self.sample_dataset:
-                    preds.append(model(**sample, return_dict=True))
-            all_logits = torch.cat([i["logits"] for i in preds])
+                sample = {
+                    k: v.to(device=model.device) for k, v in
+                    self.sample_dataset.items()
+                }
+                preds.append(model(
+                    pixel_values=sample["pixel_values"],
+                    labels=sample["label_ids"],
+                    return_dict=True)
+                )
+            all_logits = torch.cat([i["logits"].cpu() for i in preds])
             for i in range(all_logits.shape[0]):
                 self.add_preds_image(
                     torch.squeeze(all_logits[i]),
@@ -104,15 +90,3 @@ class WandbPredictionProgressCallback(WandbCallback):
                     lab=f"True Labels vs Model Predictions {i}",
                     step=state.global_step
                 )
-
-
-class SaveCallback(TrainerCallback):
-    DATASET_SAVE_NAME = "dataset.json"
-
-    def on_save(self, args: TrainingArguments, state: TrainerState,
-                control: TrainerControl, **kwargs):
-        """
-        Event called after a checkpoint save. For saving the dataloader state.
-        """
-        save_path = (Path(args.output_dir)/f"checkpoint-{state.global_step}/")
-        kwargs["train_dataloader"].dataset.save(save_path)
