@@ -14,15 +14,12 @@
 # The actual PPAN parameters can be controlled through environment variables.
 # --------------------------------------------------------------------
 
-# Load .env file
-set -a; source .env; set +a
-
 if [ $# -ne 1 ]; then
   echo "Please specify the PPAN subcommand to run as an argument"
 fi
 
-# Add our ffmpeg binary to the path since it's not installed system-wide.
-export PATH=$PPAN_FFMPEG_LOC:$PATH
+# Load .env file
+set -a; source .env; set +a
 
 # Check that the Accelerate config file exists
 ACCELERATE_CONFIG_LOC="${MLP_ACCELERATE_CONFIG:-./accelerate_config.yaml}"
@@ -31,6 +28,9 @@ if [ ! -f "$ACCELERATE_CONFIG_LOC" ]; then
     script by running 'accelerate config --config_file $ACCELERATE_CONFIG_LOC'"
     exit 1
 fi
+
+# Add our ffmpeg binary to the path since it's not installed system-wide.
+export PATH=$PPAN_FFMPEG_LOC:$PATH
 
 module load cuda
 
@@ -41,6 +41,7 @@ if [ -d "./venv" ]; then
   rm -r ./.venv
 fi
 
+#  Create a virtual env using the provided Python
 "$PPAN_PYTHON_PREFIX"/bin/python3 -m virtualenv .venv
 
 source ./.venv/bin/activate
@@ -54,8 +55,10 @@ pip install pybind11
 pip install Cython
 pip install numpy
 pip install git+https://github.com/CPJKU/madmom
+# Install PPAN
 pip install "$PPAN_REPO_ROOT"
 
+# Run the script
 accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" ppan "$1"
 
 # Clean up the virtualenv after we're done
