@@ -1,9 +1,10 @@
+#!/bin/bash
 #SBATCH --partition=GPU
 #SBATCH --job-name=bw_test
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
-#SBATCH --time=06:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=./logs/run%j.out
 #SBATCH --exclusive
 
