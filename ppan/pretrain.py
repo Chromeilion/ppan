@@ -1,22 +1,28 @@
 import os
+import random
 from pathlib import Path
 from typing import Optional, Union
-import random
 
 import torch
 import torch.nn as nn
 import torchvision.transforms.v2 as v2
+import wandb
 from dotenv import load_dotenv
+from torch.utils.data import DataLoader
 from transformers import (
     VideoMAEConfig,
     VideoMAEForPreTraining,
     TrainingArguments,
     Trainer
 )
+from transformers.integrations import WandbCallback
 
-from ppan.config import (seed, model_resolution, model_config,
+from ppan.config import fps
+from ppan.config import (seed, model_resolution, base,
                          pretrain_default, max_eval_steps)
 from ppan.dataset import BaseVideoProcessor, PPANDataset, get_samples
+from ppan.utils import TubeMaskingGenerator
+from ppan.utils import patchify, unpatchify
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -66,11 +72,11 @@ def pretrain(dataset_dir: PathLike,
     if save_every is None:
         save_every = pretrain_default["save_every"]
     load_dotenv()
-    config = VideoMAEConfig(**model_config)
+    config = VideoMAEConfig(**base)
     model = VideoMAEForPreTraining(config).train()
 
     # How many frames from the center we want in each clip
-    pad = int(model_config["num_frames"] // 2)
+    pad = int(base["num_frames"] // 2)
 
     processor = PretrainProcessor(pad=pad)
     output_map = {"vid": "pixel_values", "lab": None}
@@ -116,6 +122,11 @@ def pretrain(dataset_dir: PathLike,
         train_dataset=train_ds,
         eval_dataset=test_ds,
     )
+    progress_callback = WandbPretrainPredictionProgressCallback(
+        trainer=trainer,
+        val_dataset=test_ds
+    )
+    trainer.add_callback(progress_callback)
     trainer.train(
         resume_from_checkpoint=checkpoint_dir
     )
@@ -146,23 +157,21 @@ class PretrainTrainer(Trainer):
     """
     def __init__(self, mask_ratio: float, model, *args, **kwargs):
         super().__init__(model=model, *args, **kwargs)
-        self.mask_ratio = mask_ratio
+        self.mask_gen = TubeMaskingGenerator(
+            (
+                model.config.num_frames,
+                model.config.image_size[0]//model.config.patch_size,
+                model.config.image_size[1]//model.config.patch_size
+            ),
+            mask_ratio
+        )
 
-        self.seq_length = model.videomae.embeddings.num_patches
-        self.no_masks = round(self.seq_length * self.mask_ratio)
-        self.seq = range(self.seq_length)
-
-    def _get_mask(self, batch_size):
+    def get_mask(self, batch_size):
         """Calculate mask locations
         """
         masks = []
         for i in range(batch_size):
-            bool_masked_pos = torch.zeros(
-                self.seq_length,
-                dtype=torch.bool
-            )
-            bool_masked_pos[random.sample(self.seq, self.no_masks)] = 1
-            masks.append(bool_masked_pos)
+            masks.append(torch.tensor(self.mask_gen()))
 
         return torch.stack(masks, dim=0)
 
@@ -170,7 +179,7 @@ class PretrainTrainer(Trainer):
         """Small override which generates and injects the patch masks into the
         input.
         """
-        inputs["bool_masked_pos"] = self._get_mask(inputs["pixel_values"].shape[0])
+        inputs["bool_masked_pos"] = self.get_mask(inputs["pixel_values"].shape[0])
         return super(PretrainTrainer, self).training_step(model, inputs)
 
     def prediction_step(
@@ -181,6 +190,96 @@ class PretrainTrainer(Trainer):
             ignore_keys: Optional[list[str]] = None,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[
                torch.Tensor]]:
-        inputs["bool_masked_pos"] = self._get_mask(inputs["pixel_values"].shape[0])
+        inputs["bool_masked_pos"] = self.get_mask(inputs["pixel_values"].shape[0])
         return super(PretrainTrainer, self).prediction_step(
             model, inputs, prediction_loss_only, ignore_keys)
+
+
+class WandbPretrainPredictionProgressCallback(WandbCallback):
+    """Custom WandbCallback to log model predictions during training.
+
+    This callback logs model predictions and labels to a wandb.Table at each
+    logging step during training. It allows to visualize the
+    model predictions as the training progresses.
+    """
+
+    def __init__(self, trainer, val_dataset,
+                 num_samples=3, freq=1):
+        """Initializes the WandbPredictionProgressCallback instance.
+
+    Parameters:
+        trainer : Trainer
+            The Hugging Face Trainer instance.
+        val_dataset : Dataset
+            The validation dataset for generating predictions.
+        num_samples : int, optional
+            Number of samples to select from
+            the validation dataset for generating predictions. Defaults to 3.
+        freq : int, optional
+            Frequency of logging. Defaults to 1.
+        """
+        super().__init__()
+        self.trainer: Trainer = trainer
+        self.sample_dataset = next(iter(DataLoader(
+            val_dataset,
+            batch_size=num_samples,
+            shuffle=True
+        )))
+        self.sample_dataset["bool_masked_pos"] = trainer.get_mask(
+            self.sample_dataset["pixel_values"].shape[0])
+        self.freq = freq
+        self.mask = trainer.get_mask(num_samples)
+
+    def add_preds_vid(self, logits: torch.Tensor, model,
+                      step: int):
+        vid = self.sample_dataset["pixel_values"]
+        p = model.config.patch_size
+        tu = model.config.tubelet_size
+        patches = patchify(vid, p, tu)
+        pos_masks = 0
+        for i in range(self.mask.shape[0]):
+            for j in range(self.mask.shape[1]):
+                if self.mask[i, j]:
+                    patches[i, j, :] = logits[i, pos_masks, :]
+                    pos_masks += 1
+            pos_masks = 0
+
+        reconstructed = unpatchify(patches, p, tu, vid.shape[1],
+                                   vid.shape[3], vid.shape[4])
+
+        reconstructed = v2.functional.to_dtype(
+            v2.functional.grayscale_to_rgb(reconstructed),
+            torch.uint8, scale=True
+        )
+        reconstructed = reconstructed.cpu().numpy()
+
+        self._wandb.log(
+            {"Model predictions": wandb.Video(
+                reconstructed,
+                "Reconstructed masked images",
+                fps//2
+            )
+            },
+            step=step
+        )
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        if state.global_step % state.eval_steps * self.freq == 0:
+            model = kwargs["model"]
+            with torch.no_grad():
+                sample = {
+                    k: v.to(device=model.device) for k, v in
+                    self.sample_dataset.items()
+                }
+                preds = model(
+                    **sample,
+                    return_dict=True
+                )
+            logits = preds["logits"].cpu()
+            self.add_preds_vid(
+                logits,
+                model=model,
+                step=state.global_step
+            )
+            super().on_evaluate(args, state, control, **kwargs)
+

@@ -8,9 +8,9 @@ import os
 from pathlib import Path
 from typing import Optional
 
-import tqdm
+import numpy as np
+import torch
 from rach3datautils.utils.dataset import DatasetUtils
-from ultralytics import YOLO
 
 from ppan.config import PathLike, SAMPLE_TYPE, TEST_TRAIN_SPLIT
 
@@ -139,46 +139,6 @@ def load_all_data(rach3_dir: Optional[PathLike] = None,
     return test, train, miditest, pianoyt_test, rach3_test
 
 
-def calculate_bounding_boxes(samples, yolo_model_checkpoint) -> list[SAMPLE_TYPE]:
-    """
-    Get bounding box predictions for a list of samples.
-    Utilizes the Ultralytics package.
-
-    Parameters
-    ----------
-    samples : list[ppan.dataset.SAMPLE_TYPE]
-    yolo_model_checkpoint : PathLike
-
-    Returns
-    -------
-    samples : ppan.dataset.SAMPLE_TYPE
-        The same samples as passed in but with bounding boxes added.
-    """
-    # Load the model
-    model = YOLO(yolo_model_checkpoint)
-
-    new_samples = []
-    for sample in tqdm(samples, desc="Calculating Bounding Boxes"):
-        sample_preds = []
-        video = sample[2]
-        pred = model.predict(source=str(video), stream=True,
-                             verbose=False, vid_stride=5)
-        # Get predictions over the first 10 seconds.
-        [sample_preds.append(next(pred)) for _ in range(5*10)]
-
-        filtered_session_preds = [
-            i for i in sample_preds if i.boxes.conf.shape[0] > 0
-        ]
-        best_pred = max(filtered_session_preds, key=lambda x: x.boxes.conf[0])
-        bb_meta = json.loads(best_pred.tojson())[0]['box']
-        bb = (round(bb_meta["y1"]), round(bb_meta["y2"]),
-              round(bb_meta["x1"]), round(bb_meta["x2"]))
-        new_sample = [i for i in sample]
-        new_sample[3] = bb
-        new_samples.append(new_sample)
-    return new_samples
-
-
 def load_omaps(root: PathLike) -> TEST_TRAIN_SPLIT:
     """
     Load all samples for the OMAPS dataset for use with PPAN.
@@ -210,3 +170,53 @@ def _load_omaps_split(root: PathLike) -> list[SAMPLE_TYPE]:
     )
     return samples
 
+
+# From VideoMAE:
+# https://github.com/MCG-NJU/VideoMAE/blob/main/masking_generator.py
+class TubeMaskingGenerator:
+    def __init__(self, input_size, mask_ratio):
+        self.frames, self.height, self.width = input_size
+        self.num_patches_per_frame = self.height * self.width
+        self.total_patches = self.frames * self.num_patches_per_frame
+        self.num_masks_per_frame = int(mask_ratio * self.num_patches_per_frame)
+        self.total_masks = self.frames * self.num_masks_per_frame
+
+    def __repr__(self):
+        repr_str = "Maks: total patches {}, mask patches {}".format(
+            self.total_patches, self.total_masks
+        )
+        return repr_str
+
+    def __call__(self):
+        mask_per_frame = np.hstack([
+            np.zeros(self.num_patches_per_frame - self.num_masks_per_frame,
+                     dtype=bool),
+            np.ones(self.num_masks_per_frame,
+                    dtype=bool),
+        ])
+        np.random.shuffle(mask_per_frame)
+        mask = np.tile(mask_per_frame, (self.frames, 1)).flatten()
+        return mask
+
+def patchify(video: torch.tensor, p: int, tu: int):
+    """Patchify a batched video tensor of shape BTCHW.
+    """
+    h = video.shape[3] // p
+    w = video.shape[4] // p
+    t = video.shape[1] // tu
+
+    patches = video.reshape(
+        shape=(video.shape[0], t, tu, 1, h, p, w, p))
+    patches = torch.einsum('ntuchpwq->ntuhwpqc', patches)
+    patches = patches.reshape(patches.shape[0], -1, p ** 2)
+    return patches
+
+
+def unpatchify(patches: torch.tensor, p: int, tu: int, t: int, h: int, w: int):
+    h = h // p
+    w = w // p
+    t = t // tu
+
+    patches = patches.reshape(shape=(patches.shape[0], t, h, w, tu, p, p, 1))
+    patches = torch.einsum('nthwupqc->ntchupwq', patches)
+    return patches.reshape(shape=(patches.shape[0], t * tu, 1, h * p, w * p))

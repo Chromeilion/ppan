@@ -1,6 +1,5 @@
 import warnings
 from random import choice
-from typing import Tuple
 
 import mido
 import numpy as np

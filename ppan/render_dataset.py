@@ -8,10 +8,11 @@ import tqdm
 from dotenv import load_dotenv
 from torchvision.io import write_video
 from torchvision.transforms.v2.functional import resize
+from ultralytics import YOLO
 
 from ppan.config import processed_temporal_size
-from ppan.dataset import load_all_data
 from ppan.preprocessor import PPAnDatasetProcessor
+from ppan.utils import load_all_data
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -75,3 +76,43 @@ def save_dataset(ds, out_dir):
             f.write("\n".join([str(j) for j in i['sample']]))
             negative = torch.all(torch.squeeze(i['labels']) < 0.1).item()
             f.write(f"\nNegative sample: {negative}")
+
+
+def calculate_bounding_boxes(samples, yolo_model_checkpoint) -> list[SAMPLE_TYPE]:
+    """
+    Get bounding box predictions for a list of samples.
+    Utilizes the Ultralytics package.
+
+    Parameters
+    ----------
+    samples : list[ppan.dataset.SAMPLE_TYPE]
+    yolo_model_checkpoint : PathLike
+
+    Returns
+    -------
+    samples : ppan.dataset.SAMPLE_TYPE
+        The same samples as passed in but with bounding boxes added.
+    """
+    # Load the model
+    model = YOLO(yolo_model_checkpoint)
+
+    new_samples = []
+    for sample in tqdm(samples, desc="Calculating Bounding Boxes"):
+        sample_preds = []
+        video = sample[2]
+        pred = model.predict(source=str(video), stream=True,
+                             verbose=False, vid_stride=5)
+        # Get predictions over the first 10 seconds.
+        [sample_preds.append(next(pred)) for _ in range(5*10)]
+
+        filtered_session_preds = [
+            i for i in sample_preds if i.boxes.conf.shape[0] > 0
+        ]
+        best_pred = max(filtered_session_preds, key=lambda x: x.boxes.conf[0])
+        bb_meta = json.loads(best_pred.tojson())[0]['box']
+        bb = (round(bb_meta["y1"]), round(bb_meta["y2"]),
+              round(bb_meta["x1"]), round(bb_meta["x2"]))
+        new_sample = [i for i in sample]
+        new_sample[3] = bb
+        new_samples.append(new_sample)
+    return new_samples

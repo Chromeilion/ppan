@@ -36,6 +36,7 @@ TEST_TRAIN_SPLIT = tuple[list[SAMPLE_TYPE], list[SAMPLE_TYPE]]
 # Default model resolution
 model_crop_resolution = (112, 640)
 model_resolution = (96, 512)
+model_no_channels = 1
 
 # The number of keys on a (regular) piano
 num_labels = 88
@@ -55,8 +56,8 @@ processed_horizontal_res = 672
 # Base model config
 base = {
     "image_size": model_resolution,
-    "patch_size": 32,
-    "num_channels": 1,
+    "patch_size": 16,
+    "num_channels": model_no_channels,
     "num_frames": 5,
     "tubelet_size": 1,
     "hidden_size": 768,
@@ -92,8 +93,8 @@ small = {
     "layer_norm_eps": 1e-12,
     "norm_pix_loss": True,
     "num_attention_heads": 6,
-    "num_channels": 1,
-    "tublet_size": 1,
+    "num_channels": model_no_channels,
+    "tubelet_size": 1,
     "num_frames": 5,
     "num_hidden_layers": 12,
     "qkv_bias": True,
