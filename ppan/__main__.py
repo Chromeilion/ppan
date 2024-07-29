@@ -177,7 +177,7 @@ def main():
         "-r", "--checkpoint-dir",
         action="store",
         help="Location of a training checkpoint when continuing training.",
-        default=os.environ.get("PPAN_PRETRAIN_MODEL_CHECKPOINT", None),
+        default=os.environ.get("PPAN_OUTPUT_DIR", None),
         required=False,
     )
     parser_pretrain.add_argument(
