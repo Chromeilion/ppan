@@ -43,7 +43,7 @@ if [ -d "./venv" ]; then
 fi
 
 #  Create a virtual env using the provided Python
-"$PPAN_PYTHON_PREFIX"/bin/python3 -m virtualenv .venv
+"$PPAN_PYTHON_PREFIX"/bin/python3 -m venv .venv
 
 source ./.venv/bin/activate
 
@@ -56,6 +56,7 @@ pip install pybind11
 pip install Cython
 pip install numpy
 pip install git+https://github.com/CPJKU/madmom
+pip install accelerate
 # Install PPAN
 pip install "$PPAN_REPO_ROOT"
 
