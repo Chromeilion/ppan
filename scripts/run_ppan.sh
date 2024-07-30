@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=GPU
-#SBATCH --job-name=bw_test
+#SBATCH --job-name=ppan_run
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
