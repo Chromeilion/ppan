@@ -33,6 +33,7 @@ PathLike = Union[str, bytes, os.PathLike]
 global filecounter
 filecounter = 0
 
+
 def evaluate(preds_output: PathLike,
              model_checkpoint: PathLike,
              rach3_dir: Optional[PathLike] = None,
@@ -58,6 +59,7 @@ def evaluate(preds_output: PathLike,
         batch_size = 2
     gaussian_sigma = 1
 
+    # TODO: Get up to date with the rest of the codebase
     _, _, miditest, pianoyt_test, rach3_test = load_all_data(
         rach3_dir, pianoyt_dir, miditest_dir
     )

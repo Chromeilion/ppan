@@ -344,7 +344,7 @@ def run_pretrain(*args, **kwargs):
 
 
 def run_evaluate(*args, **kwargs):
-    from ppan.evaluate_model import evaluate
+    from ppan.evaluate import evaluate
     evaluate(*args, **kwargs)
 
 
