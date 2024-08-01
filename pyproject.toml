@@ -26,7 +26,10 @@ dependencies = [
     "torch",
     "pillow",
     "nvidia-dali-cuda120",
-    "wandb"
+    "wandb",
+    "ultralytics",
+    "moviepy", 
+    "imageio",
 ]
 
 [project.urls]
