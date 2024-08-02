@@ -169,7 +169,7 @@ def main():
     parser_pretrain.add_argument(
         "-o", "--output-dir",
         action="store",
-        default=os.environ.get("PPAN_PRETRAIN_OUTPUT_DIR"),
+        default=os.environ.get("PPAN_OUTPUT_DIR"),
         help="Where to save the trained model, full path with filename.",
         required=False,
     )
@@ -177,7 +177,7 @@ def main():
         "-r", "--checkpoint-dir",
         action="store",
         help="Location of a training checkpoint when continuing training.",
-        default=os.environ.get("PPAN_OUTPUT_DIR", None),
+        default=os.environ.get("PPAN_PRETRAIN_MODEL_CHECKPOINT", None),
         required=False,
     )
     parser_pretrain.add_argument(
