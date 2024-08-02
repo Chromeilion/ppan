@@ -61,7 +61,7 @@ pip install accelerate
 pip install "$PPAN_REPO_ROOT"
 
 # Run the script
-accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" ppan "$1"
+accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" "$PPAN_REPO_ROOT"/ppan "$1"
 
 # Clean up the virtualenv after we're done
 rm -r ./.venv
