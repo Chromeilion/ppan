@@ -21,8 +21,8 @@ PathLike = Union[str, bytes, PathLike]
 device = device("cuda" if cuda.is_available() else "cpu")
 
 # Wandb logging settings
-environ["WANDB_PROJECT"] = environ.get("PPAN_WANDB_PROJECT_NAME",
-                                       "rach3-onset-detector")
+run_name = environ.get("PPAN_WANDB_PROJECT_NAME", "ppan_run")
+environ["WANDB_PROJECT"] = run_name
 
 # Sample format used for preprocessing.
 # [[midi_path, flac_path, video_path, bounding_box, whether to rotate 180,
