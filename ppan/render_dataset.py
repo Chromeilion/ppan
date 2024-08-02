@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from random import shuffle
@@ -6,11 +7,11 @@ from typing import Union
 import torch
 import tqdm
 from dotenv import load_dotenv
-from torchvision.io import write_video
+from torchvision.io import write_jpeg
 from torchvision.transforms.v2.functional import resize
 from ultralytics import YOLO
 
-from ppan.config import processed_temporal_size
+from ppan.config import processed_temporal_size, SAMPLE_TYPE
 from ppan.preprocessor import PPAnDatasetProcessor
 from ppan.utils import load_all_data
 
@@ -70,8 +71,11 @@ def save_dataset(ds, out_dir):
             w = vid.shape[-1] - (vid.shape[-1] % 2)
             h = vid.shape[-2] - (vid.shape[-2] % 2)
             vid = resize(vid, [h, w])
-        vid = torch.permute(vid, (0, 2, 3, 1)).cpu()
-        write_video(str(save_dir/"clip.mp4"), vid, fps=30)
+#        vid = torch.permute(vid, (0, 2, 3, 1)).cpu()
+        for frame_no, frame in enumerate(range(vid.shape[0])):
+            frame = vid[frame]
+            write_jpeg(frame.cpu(), save_dir/f"frame_{frame_no}.jpeg")
+#        write_video(str(save_dir/"clip.mp4"), vid, fps=30)
         with open(save_dir/"sample_details.txt", "w") as f:
             f.write("\n".join([str(j) for j in i['sample']]))
             negative = torch.all(torch.squeeze(i['labels']) < 0.1).item()

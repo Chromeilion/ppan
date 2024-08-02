@@ -12,13 +12,13 @@ from torch.utils.data import DataLoader
 from transformers import (
     VideoMAEConfig,
     VideoMAEForPreTraining,
-    TrainingArguments,
-    Trainer
+    Trainer,
+    TrainingArguments
 )
 from transformers.integrations import WandbCallback
 
-from ppan.config import fps
-from ppan.config import (seed, model_resolution, base,
+from ppan.config import fps, run_name
+from ppan.config import (seed, model_resolution, base, small,
                          pretrain_default, max_eval_steps)
 from ppan.dataset import BaseVideoProcessor, PPANDataset, get_samples
 from ppan.utils import TubeMaskingGenerator
@@ -72,7 +72,7 @@ def pretrain(dataset_dir: PathLike,
     if save_every is None:
         save_every = pretrain_default["save_every"]
     load_dotenv()
-    config = VideoMAEConfig(**base)
+    config = VideoMAEConfig(**small)
     model = VideoMAEForPreTraining(config).train()
 
     # How many frames from the center we want in each clip
@@ -91,6 +91,7 @@ def pretrain(dataset_dir: PathLike,
         output_map=output_map
     )
     training_arguments = TrainingArguments(
+        run_name=run_name,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         num_train_epochs=no_epochs,
@@ -107,13 +108,12 @@ def pretrain(dataset_dir: PathLike,
         adam_beta1=adam_beta1,
         adam_beta2=adam_beta2,
         weight_decay=weight_decay,
-        optim="adamw_torch",
+        optim="adamw_torch_fused",
         save_steps=save_every,
-        dataloader_pin_memory=False,
+        dataloader_pin_memory=True,
         report_to=["wandb"],
-        # Video decoding is already  multithreaded, so using all cores for
-        # dataset workers is detrimental to performance.
-        dataloader_num_workers=os.cpu_count()//2
+        dataloader_num_workers=os.cpu_count()-1,
+        dataloader_prefetch_factor=2
     )
     trainer = PretrainTrainer(
         mask_ratio=mask_ratio,
@@ -142,7 +142,6 @@ class PretrainProcessor(BaseVideoProcessor):
         self.augmentations = torch.nn.Sequential(
             v2.RandomCrop(size=model_resolution),
             v2.Resize(model_resolution),
-            v2.Grayscale(num_output_channels=1),
             v2.ToDtype(torch.float32, scale=True)
         )
 

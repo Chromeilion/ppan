@@ -46,6 +46,9 @@ def train(dataset_dir: PathLike,
     if output_dir is None:
         raise AttributeError("The output directory is required for "
                              "model training.")
+    if pretrained_checkpoint is None:
+        raise AttributeError("A pretrained checkpoint is required for model "
+                             "finetuning.")
     if no_epochs is None:
         no_epochs = finetune_default["no_epochs"]
     if batch_size is None:
@@ -140,7 +143,6 @@ class TrainProcessor(BaseVideoProcessor):
         self.augmentations = torch.nn.Sequential(
             v2.RandomCrop(size=model_resolution),
             v2.Resize(model_resolution),
-            v2.Grayscale(num_output_channels=1),
             v2.ToDtype(torch.float32, scale=True)
         )
 
