@@ -333,8 +333,11 @@ class PPAnDatasetProcessor(BaseDatasetProcessor):
     @property
     def augmentations(self):
         if self._augment is None:
-            self._augment = v2.Resize(max_size=processed_horizontal_res,
-                                      size=None)
+            self._augment = torch.nn.Sequential(
+                v2.Grayscale(num_output_channels=1),
+                v2.Resize(max_size=processed_horizontal_res,
+                          size=None)
+            )
         return self._augment
 
     def finish_processing(self, vals):

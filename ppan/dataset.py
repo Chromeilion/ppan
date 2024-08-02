@@ -1,9 +1,10 @@
 import os
 from abc import ABC, abstractmethod
-from collections import defaultdict
 from pathlib import Path
 from typing import Optional, TypedDict
 
+import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torchvision.tv_tensors
@@ -56,54 +57,85 @@ class PPANDataset(Dataset):
     The provided dataset should have already been pre-processed with
     PPANPreProcessor.
     """
-    VID_FILENAME = "clip.mp4"
-    LABEL_FILENAME = "labels.pt"
+    FRAME_PREFIX: str = "frame_"
+    FRAME_EXTENSION: str = ".jpeg"
+    LABEL_FILENAME: str = "labels.pt"
 
-    def __init__(self, samples: list[Path], video_processor: BaseVideoProcessor,
-                 output_map: Optional[OutputMap] = None) -> None:
-        self.samples: list[Path] = samples
-        self.videos: list[Path] = [
-            i / self.VID_FILENAME for i in self.samples
-        ]
-        self.video_processor: BaseVideoProcessor = video_processor
-        self._labs: dict[int, Optional[torch.Tensor]] = defaultdict(
-            lambda: None
+    def __init__(self, samples: list[Path],
+                 video_processor: BaseVideoProcessor,
+                 output_map: Optional[OutputMap] = None,
+                 pad: Optional[int] = None) -> None:
+        samples = sorted([str(i) for i in samples])
+        # Store samples in a numpy array for a better memory footprint
+        self.samples: npt.NDArray[bytes] = np.array(samples).astype(np.string_)
+        self.no_frames = len(list(Path(samples[0]).glob(
+            f"{self.FRAME_PREFIX}*{self.FRAME_EXTENSION}"))
         )
-        self._midpoint: Optional[int] = None
-        self.output_map: Optional[OutputMap] = output_map
+        self.pad: Optional[int] = pad
+        self.frame_files: npt.NDArray[bytes] = np.array(
+            self._calc_frame_files()).astype(np.string_)
 
-    def _get_lab(self, idx) -> torch.Tensor:
-        if self._labs[idx] is None:
-            self._labs[idx] = torch.load(
-                self.samples[idx] / self.LABEL_FILENAME,
-                weights_only=True)
-        return torch.squeeze(self._labs[idx]).float()
+        self.vid_key: Optional[str] = "vid"
+        self.lab_key: Optional[str] = "lab"
+        if output_map is not None:
+            self.vid_key = output_map["vid"]
+            self.lab_key = output_map["lab"]
+
+        self.video_processor: BaseVideoProcessor = video_processor
+
+    @staticmethod
+    def _load_lab(filepath: str) -> torch.Tensor:
+        return torch.squeeze(torch.load(
+                filepath,
+                weights_only=True)).float()
+
+    def _get_lab(self, idx):
+        return self._load_lab(str(Path(
+            self.samples[idx].decode())/self.LABEL_FILENAME))
+
+    def _calc_frame_files(self) -> tuple[str, ...]:
+        """Get the filenames of all the frames we want to load per sample.
+        """
+        files: list[str] = []
+        midpoint = self._get_midpoint(no_frames=self.no_frames)
+        start, end = 0, self.no_frames
+        if self.pad is not None:
+            start = midpoint - self.pad
+            end = midpoint + self.pad
+        for frame_no in range(start, end):
+            files.append(self.FRAME_PREFIX+str(frame_no)+self.FRAME_EXTENSION)
+
+        return tuple(files)
 
     def _get_vid(self, idx) -> torch.Tensor:
-        return self.video_processor(torchvision.io.read_video(
-            str(self.videos[idx]),
-            pts_unit="sec",
-            output_format="TCHW"
-        )[0])
+        """Load a video from the saved frames in a sample
+        """
+        sample = self.samples[idx]
+        frames = []
+        for frame in self.frame_files:
+            frame_data = torchvision.io.read_file(str(Path(sample.decode())/frame.decode()))
+            frames.append(torchvision.io.decode_jpeg(frame_data,
+                          device="cpu"))
+        video = torch.stack(frames, dim=0)
+        return self.video_processor(video)
 
-    def _get_midpoint(self, vid: torch.tensor) -> int:
-        if self._midpoint is None:
-            self._midpoint = int(vid.shape[0] // 2) + 1
-        return self._midpoint
+    @staticmethod
+    def _get_midpoint(no_frames) -> int:
+        """Calculate the middle frame index in a list of frames.
+        """
+        return int(no_frames // 2) + 1
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx) -> (tuple[torch.Tensor, torch.Tensor] |
                                    dict[str, torch.Tensor]):
-        if self.output_map is not None:
-            out = {}
-            if self.output_map["vid"] is not None:
-                out[self.output_map["vid"]] = self._get_vid(idx)
-            if self.output_map["lab"] is not None:
-                out[self.output_map["lab"]] = self._get_lab(idx)
-            return out
-        return self._get_vid(idx), self._get_lab(idx)
+        out = {}
+        if self.vid_key is not None:
+            out[self.vid_key] = self._get_vid(idx)
+        if self.lab_key is not None:
+            out[self.lab_key] = self._get_lab(idx)
+        return out
 
 
 def get_samples(root: Path):
