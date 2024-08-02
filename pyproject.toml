@@ -27,7 +27,9 @@ dependencies = [
     "pillow",
     "nvidia-dali-cuda120",
     "wandb",
-    "av"
+    "av",
+    "moviepy",
+    "imageio"
 ]
 
 [project.urls]
