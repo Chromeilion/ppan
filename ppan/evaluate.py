@@ -21,8 +21,8 @@ from transformers import (
     VideoMAEImageProcessor
 )
 
-from ppan.config import pretrained_model, fps, temporal_res, device
-from ppan.dataset import load_all_data, load_omaps
+from ppan.config import fps, temporal_res, device
+from ppan.utils import load_all_data, load_omaps
 from ppan.midi import PPAnMidi
 from ppan.preprocessor import PPAnEvalDataset
 
@@ -81,9 +81,7 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
                         gaussian_sigma, threshold, midi_output):
     preds_output = Path(dataset_name+"_preds.pkl")
     if not preds_output.exists() and False:
-        processor = VideoMAEImageProcessor.from_pretrained(
-            pretrained_model
-        )
+        processor = VideoMAEImageProcessor.from_pretrained(model_checkpoint)
         dataset = PPAnEvalDataset(
             datasets=[samples[5]],
             video_transform=processor,

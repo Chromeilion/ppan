@@ -1,5 +1,5 @@
 """
-Misc. utility functions used accross the package.
+Misc. utility functions used across the package.
 """
 import csv
 import glob
@@ -8,8 +8,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from tqdm import tqdm
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
 from rach3datautils.utils.dataset import DatasetUtils
 
 from ppan.config import PathLike, SAMPLE_TYPE, TEST_TRAIN_SPLIT
@@ -204,19 +206,34 @@ def patchify(video: torch.tensor, p: int, tu: int):
     h = video.shape[3] // p
     w = video.shape[4] // p
     t = video.shape[1] // tu
+    c = video.shape[2]
 
     patches = video.reshape(
-        shape=(video.shape[0], t, tu, 1, h, p, w, p))
-    patches = torch.einsum('ntuchpwq->ntuhwpqc', patches)
-    patches = patches.reshape(patches.shape[0], -1, p ** 2)
+        shape=(video.shape[0], t, tu, c, h, p, w, p))
+    patches = torch.einsum('ntuchpwq->nthwupqc', patches)
+    patches = patches.reshape(patches.shape[0], -1, tu * p ** 2)
     return patches
 
 
-def unpatchify(patches: torch.tensor, p: int, tu: int, t: int, h: int, w: int):
-    h = h // p
-    w = w // p
-    t = t // tu
+def unpatchify(patches: torch.tensor, p: int, tu: int, t: int, h: int, w: int, c: int):
+    patches = patches.reshape(shape=(patches.shape[0], t//tu, h//p, w//p, tu, p, p, c))
+    patches = torch.einsum('nthwupqc->ntuchpwq', patches)
+    return patches.reshape(shape=(patches.shape[0], t, c, h, w))
 
-    patches = patches.reshape(shape=(patches.shape[0], t, h, w, tu, p, p, 1))
-    patches = torch.einsum('nthwupqc->ntchupwq', patches)
-    return patches.reshape(shape=(patches.shape[0], t * tu, 1, h * p, w * p))
+
+def count_pos_neg_samples(dataset):
+    pos, neg = 0, 0
+    batch_size = 512
+    for sample in tqdm(DataLoader(dataset, batch_size=batch_size,
+                                  num_workers=os.cpu_count()-2)):
+        lab = sample["label_ids"]
+        pos += torch.sum(lab > 0.0001, dim=0) / batch_size
+        neg += torch.sum(lab < 0.4, dim=0) / batch_size
+    return neg/pos
+
+def freeze_pretrained_weights(model) -> None:
+    """Freeze the pretrained model weights. Useful for transfer learning.
+    The model should be some Huggingface pretrained model.
+    """
+    for param in model.base_model.parameters():
+        param.requires_grad = False

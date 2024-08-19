@@ -90,15 +90,6 @@ def main():
         required=False
     )
     parser_finetune.add_argument(
-        "--class-weights",
-        action="store",
-        default=os.environ.get("PPAN_FINETUNE_CLASS_WEIGHTS", None),
-        type=float,
-        help="The weight of the positive class (1). For example, if you'd "
-             "like to weigh it twice as much as a 0, put this value to 2.",
-        required=False
-    )
-    parser_finetune.add_argument(
         "-lr", "--learning-rate",
         action="store",
         default=os.environ.get("PPAN_FINETUNE_LR", None),
@@ -152,6 +143,38 @@ def main():
         type=float,
         help="Adam optimizer beta2 parameter.",
         required=False
+    )
+    parser_finetune.add_argument(
+        "--label-smoothing",
+        action="store",
+        default=os.environ.get("PPAN_FINETUNE_LAB_SMOOTHING", None),
+        type=float,
+        help="The amount of label smoothing to apply. Defaults to 0.1."
+             "Set to 0 to disable label smoothing.",
+        required=False
+    )
+    parser_finetune.add_argument(
+        "--randaug",
+        action="store",
+        default=os.environ.get("PPAN_FINETUNE_RANDAUG", None),
+        type=float,
+        help="Whether or not to apply RandomAugment during training. "
+             "Uses 2 steps with a magnitude of 20.",
+        required=False
+    )
+    parser_finetune.add_argument(
+        "-tj", "--temporal-jitter",
+        action="store",
+        help="Whether to use the temporal jitter augmentation",
+        default=os.environ.get("PPAN_FINETUNE_TEMPORAL_JITTER", None),
+        required=False,
+    )
+    parser_finetune.add_argument(
+        "-sj", "--spatial-jitter",
+        action="store",
+        help="Whether to use the spatial jitter augmentation",
+        default=os.environ.get("PPAN_PRETRAIN_SPATIAL_JITTER", None),
+        required=False,
     )
     parser_finetune.set_defaults(func=run_train)
     # Command line for pre-training

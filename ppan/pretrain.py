@@ -1,7 +1,8 @@
 import os
 import random
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Any
+from multiprocessing import Manager
 
 import torch
 import torch.nn as nn
@@ -17,12 +18,12 @@ from transformers import (
 )
 from transformers.integrations import WandbCallback
 
-from ppan.config import fps, run_name
-from ppan.config import (seed, model_resolution, base, small,
-                         pretrain_default, max_eval_steps)
+from ppan.config import (seed, model_resolution,
+                         pretrain_default, max_eval_steps, get_model_size,
+                         fps, run_name)
 from ppan.dataset import BaseVideoProcessor, PPANDataset, get_samples
-from ppan.utils import TubeMaskingGenerator
-from ppan.utils import patchify, unpatchify
+from ppan.utils import (patchify, unpatchify, TubeMaskingGenerator,
+                        freeze_pretrained_weights)
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -72,24 +73,35 @@ def pretrain(dataset_dir: PathLike,
     if save_every is None:
         save_every = pretrain_default["save_every"]
     load_dotenv()
-    config = VideoMAEConfig(**small)
-    model = VideoMAEForPreTraining(config).train()
+
+    model, model_params = get_model()
+
+    # Freeze the pretrained weights
+    freeze_pretrained_weights(model)
 
     # How many frames from the center we want in each clip
-    pad = int(base["num_frames"] // 2)
+    pad = int(model_params["num_frames"] // 2)
 
-    processor = PretrainProcessor(pad=pad)
+    processor = PretrainProcessor()
     output_map = {"vid": "pixel_values", "lab": None}
+    manager = Manager()
+    shared_dict_train = manager.dict()
+    shared_dict_test = manager.dict()
     train_ds = PPANDataset(
+        pad=pad,
         video_processor=processor,
         samples=get_samples(dataset_dir/"train"),
-        output_map=output_map
+        output_map=output_map,
+        shared_dict=shared_dict_train
     )
     test_ds = PPANDataset(
+        pad=pad,
         video_processor=processor,
         samples=random.sample(get_samples(dataset_dir/"test"), max_eval_steps),
-        output_map=output_map
+        output_map=output_map,
+        shared_dict=shared_dict_test
     )
+
     training_arguments = TrainingArguments(
         run_name=run_name,
         per_device_train_batch_size=batch_size,
@@ -101,7 +113,6 @@ def pretrain(dataset_dir: PathLike,
         logging_steps=eval_every,
         learning_rate=learning_rate,
         do_train=True,
-        do_eval=True,
         lr_scheduler_type=scheduler_type,
         warmup_ratio=warmup_ratio,
         seed=seed,
@@ -112,8 +123,11 @@ def pretrain(dataset_dir: PathLike,
         save_steps=save_every,
         dataloader_pin_memory=True,
         report_to=["wandb"],
-        dataloader_num_workers=os.cpu_count()-1,
-        dataloader_prefetch_factor=2
+        dataloader_num_workers=(os.cpu_count()//4)-1,
+        dataloader_prefetch_factor=2,
+        log_on_each_node=False,
+        save_total_limit=4,
+        max_grad_norm=pretrain_default["grad_clip"]
     )
     trainer = PretrainTrainer(
         mask_ratio=mask_ratio,
@@ -132,23 +146,39 @@ def pretrain(dataset_dir: PathLike,
     )
 
 
+def get_model() -> tuple[nn.Module, dict[str, Any]]:
+    """Load a PPAN model. If there are pretrained weights already available
+    will load those, otherwise gives a freshly initialized model.
+    """
+    model_params, remote_pretrained = get_model_size()
+    config = VideoMAEConfig(**model_params)
+    if remote_pretrained is None:
+        model = VideoMAEForPreTraining(config)
+    else:
+        model = VideoMAEForPreTraining.from_pretrained(
+            remote_pretrained, config=config,
+            ignore_mismatched_sizes=True
+        )
+    model.train()
+    return model, model_params
+
+
 class PretrainProcessor(BaseVideoProcessor):
     """
     Dataset for masked pretraining.
     """
-    def __init__(self, pad: int = None, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.pad: Optional[int] = pad
-        self.augmentations = torch.nn.Sequential(
-            v2.RandomCrop(size=model_resolution),
-            v2.Resize(model_resolution),
-            v2.ToDtype(torch.float32, scale=True)
-        )
+        self.augmentations = v2.Compose([
+            v2.RandomResizedCrop(
+                size=model_resolution,
+                scale=(0.8, 1),
+                interpolation=3
+            )
+        ])
 
     def process_video(self, vid):
-        vid = self._center_cut(vid)
-        vid = self.augmentations(vid)
-        return vid
+        return self.augmentations(vid)
 
 
 class PretrainTrainer(Trainer):
@@ -158,7 +188,7 @@ class PretrainTrainer(Trainer):
         super().__init__(model=model, *args, **kwargs)
         self.mask_gen = TubeMaskingGenerator(
             (
-                model.config.num_frames,
+                model.config.num_frames//model.config.tubelet_size,
                 model.config.image_size[0]//model.config.patch_size,
                 model.config.image_size[1]//model.config.patch_size
             ),
@@ -179,6 +209,9 @@ class PretrainTrainer(Trainer):
         input.
         """
         inputs["bool_masked_pos"] = self.get_mask(inputs["pixel_values"].shape[0])
+        inputs["pixel_values"] = v2.functional.to_dtype(
+            inputs["pixel_values"], torch.float32, scale=True
+        )
         return super(PretrainTrainer, self).training_step(model, inputs)
 
     def prediction_step(
@@ -190,6 +223,9 @@ class PretrainTrainer(Trainer):
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[
                torch.Tensor]]:
         inputs["bool_masked_pos"] = self.get_mask(inputs["pixel_values"].shape[0])
+        inputs["pixel_values"] = v2.functional.to_dtype(
+            inputs["pixel_values"], torch.float32, scale=True
+        )
         return super(PretrainTrainer, self).prediction_step(
             model, inputs, prediction_loss_only, ignore_keys)
 
@@ -203,7 +239,7 @@ class WandbPretrainPredictionProgressCallback(WandbCallback):
     """
 
     def __init__(self, trainer, val_dataset,
-                 num_samples=3, freq=1):
+                 num_samples=10, freq=1):
         """Initializes the WandbPredictionProgressCallback instance.
 
     Parameters:
@@ -226,6 +262,9 @@ class WandbPretrainPredictionProgressCallback(WandbCallback):
         )))
         self.sample_dataset["bool_masked_pos"] = trainer.get_mask(
             self.sample_dataset["pixel_values"].shape[0])
+        self.sample_dataset["pixel_values"] = v2.functional.to_dtype(
+            self.sample_dataset["pixel_values"], torch.float32, scale=True
+        )
         self.freq = freq
         self.mask = trainer.get_mask(num_samples)
 
@@ -244,7 +283,7 @@ class WandbPretrainPredictionProgressCallback(WandbCallback):
             pos_masks = 0
 
         reconstructed = unpatchify(patches, p, tu, vid.shape[1],
-                                   vid.shape[3], vid.shape[4])
+                                   vid.shape[3], vid.shape[4], vid.shape[2])
 
         reconstructed = v2.functional.to_dtype(
             v2.functional.grayscale_to_rgb(reconstructed),
@@ -263,22 +302,23 @@ class WandbPretrainPredictionProgressCallback(WandbCallback):
         )
 
     def on_evaluate(self, args, state, control, **kwargs):
-        if state.global_step % state.eval_steps * self.freq == 0:
-            model = kwargs["model"]
-            with torch.no_grad():
-                sample = {
-                    k: v.to(device=model.device) for k, v in
-                    self.sample_dataset.items()
-                }
-                preds = model(
-                    **sample,
-                    return_dict=True
-                )
-            logits = preds["logits"].cpu()
-            self.add_preds_vid(
-                logits,
-                model=model,
-                step=state.global_step
-            )
+        if self.trainer.state.is_world_process_zero:
             super().on_evaluate(args, state, control, **kwargs)
+            if state.global_step % state.eval_steps * self.freq == 0:
+                model = kwargs["model"]
+                with torch.no_grad():
+                    sample = {
+                        k: v.to(device=model.device) for k, v in
+                        self.sample_dataset.items()
+                    }
+                    preds = model(
+                        **sample,
+                        return_dict=True
+                    )
+                logits = preds["logits"].cpu()
+                self.add_preds_vid(
+                    logits,
+                    model=model,
+                    step=state.global_step
+                )
 
