@@ -16,15 +16,13 @@ from rach3datautils.utils.multimedia import MultimediaTools
 from scipy.ndimage import gaussian_filter
 from torch import no_grad
 from tqdm import tqdm
-from transformers import (
-    VideoMAEForVideoClassification,
-    VideoMAEImageProcessor
-)
 
-from ppan.config import fps, temporal_res, device
-from ppan.utils import load_all_data, load_omaps
+from ppan.config import fps, temporal_res, device, processed_temporal_size
+from ppan.utils import load_all_data
 from ppan.midi import PPAnMidi
 from ppan.preprocessor import PPAnEvalDataset
+from ppan.model import PPANModel, PPANVideoProcessor
+
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -57,15 +55,19 @@ def evaluate(preds_output: PathLike,
         threshold = 0.5
     if batch_size is None:
         batch_size = 2
+    else:
+        batch_size = int(batch_size)
     gaussian_sigma = 1
 
     # TODO: Get up to date with the rest of the codebase
     _, _, miditest, pianoyt_test, rach3_test = load_all_data(
         rach3_dir, pianoyt_dir, miditest_dir
     )
-    omaps_test, _ = load_omaps(os.environ["PPAN_OMAPS_DIR"])
-    datasets = [omaps_test, rach3_test, miditest, pianoyt_test]
-    dataset_names = ["omaps", "rach3", "miditest", "pianoyt"]
+#    omaps_test, _ = load_omaps(os.environ["PPAN_OMAPS_DIR"])
+#    datasets = [omaps_test, rach3_test, miditest, pianoyt_test]
+#    dataset_names = ["omaps", "rach3", "miditest", "pianoyt"]
+    datasets = [rach3_test, miditest, pianoyt_test]
+    dataset_names = ["rach3", "miditest", "pianoyt"]
     [evaluate_on_dataset(
         i,
         dataset_name=j,
@@ -80,17 +82,21 @@ def evaluate(preds_output: PathLike,
 def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
                         gaussian_sigma, threshold, midi_output):
     preds_output = Path(dataset_name+"_preds.pkl")
-    if not preds_output.exists() and False:
-        processor = VideoMAEImageProcessor.from_pretrained(model_checkpoint)
+    model = PPANModel.from_pretrained(
+        model_checkpoint
+    ).eval().to(device)
+    if not preds_output.exists():
+        processor = PPANVideoProcessor()
         dataset = PPAnEvalDataset(
-            datasets=[samples[5]],
+            datasets=samples,
             video_transform=processor,
             batch_size=batch_size,
-            step=1
+            step=1,
+            temporal_size=processed_temporal_size
         )
         with no_grad():
             preds_rach3 = eval_loop(dataset=dataset,
-                                    model_checkpoint=model_checkpoint)
+                                    model=model)
 
         with open(preds_output, "wb") as f:
             pickle.dump(obj=preds_rach3, file=f)
@@ -104,7 +110,10 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
     all_stats = []
     all_vid_paths = []
     for vid_path, preds in preds_rach3.items():
-        final_pred = calc_time(preds)
+        video_len = float(MultimediaTools().ff_probe(vid_path)["streams"][0]["duration"])
+        pred_step = video_len / max([i[1] for i in preds])
+        preds = [(i[0], i[1]*pred_step) for i in preds]
+        final_pred = calc_time(preds, model)
         onset_array = final_pred_to_onset_array(final_pred, threshold,
                                                 gaussian_sigma)
         onset_array = onset_array.astype(int) * 100
@@ -146,7 +155,7 @@ def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
     """
     pred_array = np.array([i[1] for i in final_pred]).astype(float)
     pred_array = gaussian_filter(pred_array, axes=[0], sigma=sigma,
-                                 radius=16)
+                                 radius=6)
     pred_array = pred_array > threshold
     revised_preds = []
     nonzero_preds = pred_array.nonzero()
@@ -177,15 +186,13 @@ def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
     return onset_array.T
 
 
-def eval_loop(dataset, model_checkpoint):
-    model = VideoMAEForVideoClassification.from_pretrained(
-        model_checkpoint
-    ).eval().to(device)
-
+def eval_loop(dataset, model):
     preds_dict = defaultdict(list)
     sig = nn.Sigmoid()
     for i in tqdm(dataset):
-        logits = model(i['pixel_values'].to(device)).logits
+        pixel_values = i['pixel_values'][:, :model.config.num_frames, ...].to(device)
+        model_out = model(pixel_values)
+        logits = model_out["logits"]
         preds = sig(logits)
         all_files = dataset.get_all_video_samples()
         for timestamps, file_idx, pred in zip(i['timestamps'].to(device),
@@ -224,7 +231,7 @@ def perf_to_int_pitch(perf):
         intervals = np.array(
             [[i['note_on'], i['note_off']] for i in perf[0].notes])
         equal = np.where(intervals[:, 1] <= intervals[:, 0])
-        if equal[0]:
+        if equal:
             intervals[equal, 1] += 0.0001
         pitches = np.array(
             [mir_eval.util.midi_to_hz(i['midi_pitch']) for i in perf[0].notes])
@@ -285,21 +292,9 @@ def calc_stats(midi: PPAnMidi, onset_array: np.ndarray):
     return mir_scores
 
 
-def calc_time(preds):
+def calc_time(preds, model):
     final_preds = []
     for pred, times in preds:
-        middle = times.shape[0] // 2
-        time = times[middle]
-        if times.shape[0] % 2 == 0:
-            time += times[middle+1]
-            time = time / 2.
+        time = times + (model.config.num_frames/fps)/2
         final_preds.append((time, pred))
-    # Because the windows don't start at time zero, we need to insert a few
-    # frames at the start of the preds so that they start at zero.
-    no_to_insert = int(final_preds[0][0] / (1./30.))
-    [final_preds.insert(
-        0,
-        (temporal_res*i, np.zeros(shape=final_preds[0][1].shape,
-                                  dtype=np.bool_)))
-        for i in reversed(range(no_to_insert))]
     return final_preds

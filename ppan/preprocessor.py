@@ -14,10 +14,10 @@ from nvidia.dali.plugin.pytorch import DALIGenericIterator
 from rach3datautils.utils.multimedia import MultimediaTools
 from torch.utils.data import IterableDataset
 from torchvision import tv_tensors
-from transformers import VideoMAEImageProcessor
 
 from ppan.config import seed, SAMPLE_TYPE, processed_horizontal_res
 from ppan.midi import PPAnMidi
+from ppan.model import PPANVideoProcessor
 
 
 class BaseDatasetProcessor(IterableDataset):
@@ -31,7 +31,7 @@ class BaseDatasetProcessor(IterableDataset):
             epoch_size: Optional[int] = None,
             frame_transform: Optional[Callable[[torch.tensor],
                                                torch.tensor]] = None,
-            video_transform: Optional[VideoMAEImageProcessor] = None,
+            video_transform: Optional[PPANVideoProcessor] = None,
             temporal_res: Optional[float] = None,
             temporal_size: Optional[float] = None,
             dataset_max_framerate: Optional[int] = None,
@@ -49,8 +49,7 @@ class BaseDatasetProcessor(IterableDataset):
         epoch_size : Optional[int]
         frame_transform : Optional[Callable]
         video_transform : Optional[Callable]
-            whether to shuffle the dataset every time a new generator loop is
-            started.
+            Transformation applied to the entire video clip at once
         temporal_res : Optional[float]
             The distance in seconds between yielded frames.
         step : Optional[int]
@@ -73,7 +72,7 @@ class BaseDatasetProcessor(IterableDataset):
 
         self.pretrain = pretrain
         self.batch_size = batch_size
-        self.lenience = 0
+        self.lenience = 1
         self.max_iters_per_epoch = max_iters_per_epoch
         self.cachefile_name = cachefile_name
         self.step = step
@@ -81,7 +80,7 @@ class BaseDatasetProcessor(IterableDataset):
         self.temporal_res = temporal_res
         self.temporal_size = temporal_size
         dataset_frametime = 1 / dataset_max_framerate
-        self.no_frames_per_clip = int(self.temporal_size // dataset_frametime)
+        self.no_frames_per_clip = int(self.temporal_size // dataset_frametime) + 2*self.lenience
         self.temporal_res_frames = int(self.temporal_size // self.temporal_res)
         self.epoch_size: int = epoch_size
 
@@ -156,8 +155,7 @@ class BaseDatasetProcessor(IterableDataset):
         ]
         dali_iter = DALIGenericIterator(
             pipes,
-            ['pixel_values', 'label', 'note_vec',
-             'timestamps'],
+            ['pixel_values', 'label', 'note_vec', 'timestamps'],
             reader_name="VideoReader"
         )
         return dali_iter
@@ -203,8 +201,8 @@ class BaseDatasetProcessor(IterableDataset):
         """
         if self.dataset[label[0].item()][0] is None:
             return torch.tensor([0], device=label.device)
-        midi = self.get_midi(label[0].item())
-        time = timestamps.item() + self.temporal_res_frames // 2
+        midi: PPAnMidi = self.get_midi(label[0].item())
+        time = int(timestamps.item() + self.temporal_res_frames // 2)
         notes_vec = midi(
             time,
             device=label.device,
@@ -217,7 +215,6 @@ class BaseDatasetProcessor(IterableDataset):
         sample = self.dataset[label]
         crop = sample[3]
         rotate_180 = sample[4]
-        random_resize = sample[5]
 
         # Some videos in PianoYT are the wrong resolution smh my head
         if "PianoYT" in Path(sample[0]).parts:
@@ -225,20 +222,9 @@ class BaseDatasetProcessor(IterableDataset):
                 video = v2.functional.resize(video, [720, 1280])
             elif video.shape[-1] == 1280 and abs(crop[-1] - 1280) > abs(crop[-1] - 1920):
                 video = v2.functional.resize(video, [1080, 1920])
+
         if crop is not None:
             crop = torch.tensor(crop)
-            if random_resize:
-                # Randomly resize the crop as an augmentation
-                rand_am = torch.randint(
-                    self.rand_resize_interval[0],
-                    self.rand_resize_interval[1],
-                    [4]
-                )
-                # We either have to subtract or add depending on whether
-                # it's the left edge, right edge, top edge or bottom edge.
-                crop[[1, 3]] += rand_am[:2]
-                crop[[0, 2]] -= rand_am[2:]
-
             box = tv_tensors.BoundingBoxes(
                 torch.tensor([crop[0], crop[2], crop[1], crop[3]]),
                 format=tv_tensors.BoundingBoxFormat("XYXY"),
@@ -250,30 +236,13 @@ class BaseDatasetProcessor(IterableDataset):
         if rotate_180:
             video = functional.rotate(video, 180)
 
-        try:
+        if len(sample) >= 7:
             if sample[6] is not None:
                 video = functional.hflip(video)
-        except IndexError:
-            pass
 
         # Apply augmentations to the cropped video
         video = self.augmentations(video)
 
-        return video
-
-    @staticmethod
-    def _pad_to_square(video: torch.Tensor):
-        # Pad the video into a square shape to prevent any more
-        # changes to the aspect ratio.
-        shortest_dim = torch.argmin(torch.tensor(video.shape[-2:]))
-        max_dim = torch.argmax(torch.tensor(video.shape[-2:]))
-
-        amount_to_pad = (video.shape[-2:][max_dim] -
-                         video.shape[-2:][shortest_dim])
-        if shortest_dim == 1:
-            video = v2.functional.pad(video, [amount_to_pad, 0])
-        else:
-            video = v2.functional.pad(video, [0, amount_to_pad])
         return video
 
     def file_list(self) -> str:
@@ -296,7 +265,7 @@ class BaseDatasetProcessor(IterableDataset):
         [tot.extend(i.split("\n")) for i in file_list]
         return "\n".join(file_list)
 
-    @pipeline_def()
+    @pipeline_def
     def video_pipe(self, num_gpus: int, d_id: int):
         video, label, timestamps = self.get_video_reader(
             num_gpus, d_id
@@ -306,23 +275,12 @@ class BaseDatasetProcessor(IterableDataset):
             video, label,
             function=self.video_pipe_pytorch
         )
-        note_vec = 0
-        if not self.pretrain:
-            note_vec = pfn.torch_python_function(
-                label,
-                timestamps,
-                function=self.midi_pipe_pytorch
-            )
+        note_vec = pfn.torch_python_function(
+            label,
+            timestamps,
+            function=self.midi_pipe_pytorch
+        )
         return video, label, note_vec, timestamps
-
-    def _get_color_augmentation(self):
-        if os.environ.get("PPAN_AUG_GREYSCALE", "True") == "False":
-            if self.video_transform is not None:
-                if self.video_transform.do_normalize:
-                    return v2.Normalize(mean=self.video_transform.image_mean,
-                                        std=self.video_transform.image_std)
-        else:
-            return v2.Grayscale(num_output_channels=1)
 
 
 class PPAnDatasetProcessor(BaseDatasetProcessor):
@@ -334,7 +292,6 @@ class PPAnDatasetProcessor(BaseDatasetProcessor):
     def augmentations(self):
         if self._augment is None:
             self._augment = torch.nn.Sequential(
-                v2.Grayscale(num_output_channels=1),
                 v2.Resize(max_size=processed_horizontal_res,
                           size=None)
             )
@@ -360,10 +317,6 @@ class PPAnDatasetProcessor(BaseDatasetProcessor):
             num_shards=num_gpus
         )
 
-    def _get_color_augmentation(self):
-        if os.environ.get("PPAN_AUG_GREYSCALE", "True") == "False":
-            return lambda x: x
-
 
 class PPAnEvalDataset(BaseDatasetProcessor):
     """
@@ -373,8 +326,11 @@ class PPAnEvalDataset(BaseDatasetProcessor):
     @property
     def augmentations(self):
         if self._augment is None:
-            self._augment = v2.Compose([v2.ToDtype(torch.float, scale=True),
-                                        self._get_color_augmentation()])
+            self._augment = torch.nn.Sequential(
+                v2.Resize(max_size=processed_horizontal_res,
+                          size=None),
+                self.video_transform
+            )
         return self._augment
 
     def finish_processing(self, vals):
@@ -384,22 +340,19 @@ class PPAnEvalDataset(BaseDatasetProcessor):
                 'file_idx': vals['label']}
 
     def get_all_video_samples(self):
-        all_vids = []
-        [all_vids.append(str(i[2])) for i in self.dataset]
-        return all_vids
+        return [str(i[2]) for i in self.dataset]
 
     def get_video_reader(self, num_gpus, d_id) -> fn.readers.video:
         return fn.readers.video(
             device="gpu",
             filenames=self.get_all_video_samples(),
             labels=[],
-            enable_timestamps=True,
+            enable_frame_num=True,
             sequence_length=self.no_frames_per_clip,
             shard_id=d_id,
             num_shards=num_gpus,
             random_shuffle=False,
-            initial_fill=2,
-            name=f"VideoReader",
-            step=self.step,
-            file_list_include_preceding_frame=True,
+            name="VideoReader",
+            step=1,
+            file_list_include_preceding_frame=True
         )

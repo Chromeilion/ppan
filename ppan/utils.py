@@ -8,9 +8,11 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import torchvision.transforms.v2 as v2
 from tqdm import tqdm
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from rach3datautils.utils.dataset import DatasetUtils
 
@@ -231,9 +233,158 @@ def count_pos_neg_samples(dataset):
         neg += torch.sum(lab < 0.4, dim=0) / batch_size
     return neg/pos
 
-def freeze_pretrained_weights(model) -> None:
+def freeze_weights(model) -> None:
     """Freeze the pretrained model weights. Useful for transfer learning.
     The model should be some Huggingface pretrained model.
     """
     for param in model.base_model.parameters():
         param.requires_grad = False
+
+
+def unfreeze_weights(model) -> None:
+    """Freeze the pretrained model weights. Useful for transfer learning.
+    The model should be some Huggingface pretrained model.
+    """
+    for param in model.base_model.parameters():
+        param.requires_grad = True
+
+
+# From "Asymmetric Loss For Multi-Label Classification"(ICCV, 2021)
+# See: https://github.com/Alibaba-MIIL/ASL, https://arxiv.org/abs/2009.14119
+class AsymmetricLossOptimized(nn.Module):
+    ''' Notice - optimized version, minimizes memory allocation and gpu uploading,
+    favors inplace operations'''
+
+    def __init__(self, gamma_neg=4, gamma_pos=1, clip=0.05, eps=1e-8, disable_torch_grad_focal_loss=False):
+        super(AsymmetricLossOptimized, self).__init__()
+
+        self.gamma_neg = gamma_neg
+        self.gamma_pos = gamma_pos
+        self.clip = clip
+        self.disable_torch_grad_focal_loss = disable_torch_grad_focal_loss
+        self.eps = eps
+
+        # prevent memory allocation and gpu uploading every iteration, and encourages inplace operations
+        self.targets = self.anti_targets = self.xs_pos = self.xs_neg = self.asymmetric_w = self.loss = None
+
+    def forward(self, x, y):
+        """"
+        Parameters
+        ----------
+        x: input logits
+        y: targets (multi-label binarized vector)
+        """
+
+        self.targets = y
+        self.anti_targets = 1 - y
+
+        # Calculating Probabilities
+        self.xs_pos = torch.sigmoid(x)
+        self.xs_neg = 1.0 - self.xs_pos
+
+        # Asymmetric Clipping
+        if self.clip is not None and self.clip > 0:
+            self.xs_neg.add_(self.clip).clamp_(max=1)
+
+        # Basic CE calculation
+        self.loss = self.targets * torch.log(self.xs_pos.clamp(min=self.eps))
+        self.loss.add_(self.anti_targets * torch.log(self.xs_neg.clamp(min=self.eps)))
+
+        # Asymmetric Focusing
+        if self.gamma_neg > 0 or self.gamma_pos > 0:
+            if self.disable_torch_grad_focal_loss:
+                torch.set_grad_enabled(False)
+            self.xs_pos = self.xs_pos * self.targets
+            self.xs_neg = self.xs_neg * self.anti_targets
+            self.asymmetric_w = torch.pow(1 - self.xs_pos - self.xs_neg,
+                                          self.gamma_pos * self.targets + self.gamma_neg * self.anti_targets)
+            if self.disable_torch_grad_focal_loss:
+                torch.set_grad_enabled(True)
+            self.loss *= self.asymmetric_w
+
+        return -self.loss.mean()
+
+
+class AspectJitter(nn.Module):
+    def __init__(self, output_size, resize_interval: Optional[int] = None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if resize_interval is None:
+            resize_interval = (0, 10)
+        self.rand_resize_interval = resize_interval
+        self.resize = v2.Resize(output_size)
+
+    def forward(self, x):
+        rand_am = torch.randint(
+            self.rand_resize_interval[0],
+            self.rand_resize_interval[1],
+            [4]
+        )
+        x = x[..., rand_am[0]:x.shape[-2]-rand_am[1], rand_am[2]:x.shape[-1]-rand_am[3]]
+        x = self.resize(x)
+        return x
+
+
+"""
+Running cell masking is taken from:
+ - https://github.com/OpenGVLab/VideoMAEv2/
+ - https://github.com/alibaba-mmai-research/Masked-Action-Recognition
+
+Specifically, these papers:
+ - https://arxiv.org/abs/2303.16727
+ - https://arxiv.org/abs/2207.11660
+"""
+
+class Cell:
+
+    def __init__(self, num_masks, num_patches):
+        self.num_masks = num_masks
+        self.num_patches = num_patches
+        self.size = num_masks + num_patches
+        self.queue = np.hstack([np.ones(num_masks), np.zeros(num_patches)])
+        self.queue_ptr = 0
+
+    def set_ptr(self, pos=-1):
+        self.queue_ptr = np.random.randint(self.size) if pos < 0 else pos
+
+    def get_cell(self):
+        cell_idx = (np.arange(self.size) + self.queue_ptr) % self.size
+        return self.queue[cell_idx]
+
+    def run_cell(self):
+        self.queue_ptr += 1
+
+
+class RunningCellMaskingGenerator:
+
+    def __init__(self, input_size, mask_ratio=0.5):
+        self.frames, self.height, self.width = input_size
+        self.mask_ratio = mask_ratio
+
+        num_masks_per_cell = int(4 * self.mask_ratio)
+        assert 0 < num_masks_per_cell < 4
+        num_patches_per_cell = 4 - num_masks_per_cell
+
+        self.cell = Cell(num_masks_per_cell, num_patches_per_cell)
+        self.cell_size = self.cell.size
+
+        mask_list = []
+        for ptr_pos in range(self.cell_size):
+            self.cell.set_ptr(ptr_pos)
+            mask = []
+            for _ in range(self.frames):
+                self.cell.run_cell()
+                mask_unit = self.cell.get_cell().reshape(2, 2)
+                mask_map = np.tile(mask_unit,
+                                   [self.height // 2, self.width // 2])
+                mask.append(mask_map.flatten())
+            mask = np.stack(mask, axis=0)
+            mask_list.append(mask)
+        self.all_mask_maps = np.stack(mask_list, axis=0)
+
+    def __repr__(self):
+        repr_str = f"Running Cell Masking with mask ratio {self.mask_ratio}"
+        return repr_str
+
+    def __call__(self):
+        mask = self.all_mask_maps[np.random.randint(self.cell_size)]
+        return np.copy(mask)

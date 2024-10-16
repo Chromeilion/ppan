@@ -16,7 +16,7 @@ class PPAnMidi:
     """
     Class for handling midi operations. Things like tokenization and loading.
     """
-    TIME_DIV = 120
+    TIME_DIV = 30
     # Convert midi notes to their names, taken from here:
     # https://gist.github.com/devxpy/063968e0a2ef9b6db0bd6af8079dad2a
     NOTES = ['c', 'c#', 'd', 'd#', 'e', 'f', 'f#', 'g', 'g#', 'a', 'a#',
@@ -26,7 +26,7 @@ class PPAnMidi:
     PIANO_SHIFT = 21
 
     def __init__(self, n_frames: int, temporal_res: float,
-                 lenience: int, percentage_negative: float = 0.01):
+                 lenience: int, percentage_negative: float = 0.08):
 
         self.midi_filepath = None
         self._performance = None
@@ -64,7 +64,7 @@ class PPAnMidi:
                  dtype: torch.dtype):
         if isinstance(time, float):
             return torch.tensor(
-                self.oo_array[:, int(time // self.temporal_res)],
+                self.oo_array[:, round(time / self.temporal_res)],
                 device=device, dtype=dtype)
         else:
             return torch.tensor(self.oo_array[:, time],
@@ -195,9 +195,8 @@ class PPAnMidi:
         segments = []
         segment_size = 1
         for i in range(1, len(mask)):
-            if mask[i-1] == mask[i] + 1:
+            if mask[i-1] + 1 == mask[i]:
                 segment_size += 1
-                print("Hit")
                 continue
             segments.append((name, lab, mask[i-segment_size],
                              mask[i-1]+1))

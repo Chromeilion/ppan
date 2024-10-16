@@ -34,13 +34,14 @@ def process(rach3_dir: PathLike,
     test_dir.mkdir(exist_ok=True)
     train_dir.mkdir(exist_ok=True)
 
+    rach3_dir, miditest_dir = None, None
     test_samples, train_samples, _, _, _ = load_all_data(
         rach3_dir, pianoyt_dir, miditest_dir
     )
     # Remove the automatic crop resize
-    train_samples = [
-        (i, j, k, l, m, False, n) for i, j, k, l, m, n in train_samples
-    ]
+    for i in range(len(train_samples)):
+        train_samples[i][5] = False
+
     shuffle(test_samples)
     shuffle(train_samples)
     train_ds = PPAnDatasetProcessor(
@@ -67,15 +68,16 @@ def save_dataset(ds, out_dir):
         save_dir.mkdir(exist_ok=True)
         vid = torch.squeeze(i["pixel_values"], dim=0)
         torch.save((i['labels'] > 0.1).cpu(), save_dir/"labels.pt")
+        # Ensure we have an even value for height and width
         if vid.shape[-1] % 2 != 0 or vid.shape[-2] % 2 != 0:
             w = vid.shape[-1] - (vid.shape[-1] % 2)
             h = vid.shape[-2] - (vid.shape[-2] % 2)
             vid = resize(vid, [h, w])
-#        vid = torch.permute(vid, (0, 2, 3, 1)).cpu()
+
         for frame_no, frame in enumerate(range(vid.shape[0])):
             frame = vid[frame]
             write_jpeg(frame.cpu(), save_dir/f"frame_{frame_no}.jpeg")
-#        write_video(str(save_dir/"clip.mp4"), vid, fps=30)
+
         with open(save_dir/"sample_details.txt", "w") as f:
             f.write("\n".join([str(j) for j in i['sample']]))
             negative = torch.all(torch.squeeze(i['labels']) < 0.1).item()

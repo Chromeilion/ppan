@@ -1,28 +1,24 @@
 import os
-import random
 from pathlib import Path
 from typing import Optional, Union
 from multiprocessing import Manager
+from random import choices, shuffle
 
 import torch
-import torch.nn as nn
 import torchvision.transforms.v2 as v2
 import wandb
 from dotenv import load_dotenv
 from torch.utils.data import DataLoader
 from transformers import (
-    VideoMAEForVideoClassification,
-    VideoMAEConfig,
     TrainingArguments,
     Trainer
 )
 from transformers.integrations import WandbCallback
 
-from ppan.config import get_model_size
-from ppan.config import (seed, num_labels, model_resolution,
-                         model_crop_resolution, max_eval_steps,
-                         finetune_default, class_weights)
-from ppan.dataset import PPANDataset, BaseVideoProcessor, get_samples
+from ppan.config import (seed, num_labels,
+                         finetune_default, IMAGENET_STD, IMAGENET_MEAN)
+from ppan.dataset import (PPANDataset, get_samples)
+from ppan.model import PPANModel, PPANConfig, PPANVideoProcessor
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -33,6 +29,7 @@ def train(dataset_dir: PathLike,
           no_epochs: Optional[int] = None,
           eval_every: Optional[int] = None,
           save_every: Optional[int] = None,
+          encoder_frozen: Optional[bool] = None,
           batch_size: Optional[int] = None,
           learning_rate: Optional[float] = None,
           weight_decay: Optional[float] = None,
@@ -52,15 +49,16 @@ def train(dataset_dir: PathLike,
     if output_dir is None:
         raise AttributeError("The output directory is required for "
                              "model training.")
-    if pretrained_checkpoint is None:
-        raise AttributeError("A pretrained checkpoint is required for model "
-                             "finetuning.")
+    if encoder_frozen is None:
+        encoder_frozen = True
+    if adam_beta1 is None:
+        adam_beta1 = finetune_default["adam_beta1"]
+    if adam_beta2 is None:
+        adam_beta2 = finetune_default["adam_beta2"]
     if no_epochs is None:
         no_epochs = finetune_default["no_epochs"]
     if batch_size is None:
         batch_size = finetune_default["batch_size"]
-    if learning_rate is None:
-        learning_rate = finetune_default["learning_rate"]
     if weight_decay is None:
         weight_decay = finetune_default["weight_decay"]
     if warmup_ratio is None:
@@ -77,43 +75,51 @@ def train(dataset_dir: PathLike,
         temporal_jitter = finetune_default["temporal_jitter"]
     if spatial_jitter is None:
         spatial_jitter = finetune_default["spatial_jitter"]
+    rotate_180 = finetune_default["rotate_180"]
+    rand_erase = finetune_default["rand_erase"]
+    mask_percentage = finetune_default["mask_percentage"]
 
     load_dotenv()
     dataset_dir = Path(dataset_dir)
-    # How many frames from the center we want in each clip
-    pad = int(get_model_size()[0]["num_frames"] // 2)
-    processor = FinetuneProcessor(randaug=randaug,
-                                  spatial_jitter=spatial_jitter)
-    output_map = {"vid": "pixel_values", "lab": "label_ids"}
+    processor = PPANVideoProcessor(randaug=randaug,
+                                   spatial_jitter=spatial_jitter,
+                                   rotate_180=rotate_180,
+                                   rand_erase=rand_erase)
+
+    # Remap the default dataset output dictionary keys to what our model expects
+    output_map = {"vid": "pixel_values", "lab": "label_ids", "mask": None}
+
+    train_samples: list = get_samples(dataset_dir/"train")
+    # Going through the entire val set while training is too time-consuming.
+    validation_samples = choices(get_samples(dataset_dir/"test"), k=1000)
+
+    # In order to avoid redundant copies of frames being cached, we
+    # create a shared dictionary that can be used as a cache by all
+    # dataset workers.
     manager = Manager()
     shared_dict_train = manager.dict()
     shared_dict_test = manager.dict()
+    model = PPANModel(PPANConfig()).train()
     train_ds = PPANDataset(
-        pad=pad,
         video_processor=processor,
-        samples=get_samples(dataset_dir/"train"),
+        samples=train_samples,
         output_map=output_map,
         shared_dict=shared_dict_train,
-        temporal_jitter=temporal_jitter
+        temporal_jitter=temporal_jitter,
+        mask_percentage=mask_percentage,
+        tubelet_size=(model.pretrained_model.config.tubelet_size,
+                      model.pretrained_model.config.patch_size,
+                      model.pretrained_model.config.patch_size)
     )
-    test_ds = PPANDataset(
-        pad=pad,
-        video_processor=FinetuneProcessor(),
-        samples=random.sample(get_samples(dataset_dir/"test"), max_eval_steps),
+    val_ds = PPANDataset(
+        video_processor=PPANVideoProcessor(),
+        samples=validation_samples,
         output_map=output_map,
         shared_dict=shared_dict_test
     )
 
-    model = VideoMAEForVideoClassification.from_pretrained(
-        pretrained_checkpoint,
-        problem_type="regression",
-        num_labels=num_labels,
-        ignore_mismatched_sizes=True,
-        attention_probs_dropout_prob=finetune_default["attention_probs_dropout_prob"],
-        hidden_dropout_prob=finetune_default["hidden_dropout_prob"]
-    ).train()
-
     training_arguments = TrainingArguments(
+        ddp_find_unused_parameters=False,
         num_train_epochs=no_epochs,
         output_dir=str(output_dir),
         eval_strategy="steps",
@@ -131,160 +137,29 @@ def train(dataset_dir: PathLike,
         report_to=["wandb"],
         dataloader_num_workers=os.cpu_count() // 4 - 1,
         log_on_each_node=False,
-        ddp_find_unused_parameters=False,
         save_total_limit=4,
         max_grad_norm=finetune_default["grad_clip"]
     )
-    optimizer = torch.optim.SGD(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=learning_rate,
-        momentum=finetune_default["momentum"],
-        weight_decay=weight_decay,
+        lr=finetune_default["lr_adamw"],
+        betas=(adam_beta1, adam_beta2),
+        weight_decay=weight_decay
     )
-    trainer = FinetuneTrainer(
-        weight=torch.log2(torch.tensor(class_weights)),
+    trainer = Trainer(
         model=model,
         args=training_arguments,
         train_dataset=train_ds,
-        eval_dataset=test_ds,
-        label_smoothing=label_smoothing,
+        eval_dataset=val_ds,
         optimizers=(optimizer, None)
     )
     progress_callback = WandbFinetunePredictionProgressCallback(
         trainer=trainer,
         train_dataset=train_ds,
-        val_dataset=test_ds
+        val_dataset=val_ds
     )
     trainer.add_callback(progress_callback)
-
     trainer.train(resume_from_checkpoint=checkpoint_dir)
-
-
-class FinetuneProcessor(BaseVideoProcessor):
-    """
-    Video processor for PPAN finetuning
-    """
-    def __init__(self, randaug: Optional[bool] = None,
-                 spatial_jitter: Optional[bool] = None,
-                 *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if spatial_jitter is None:
-            spatial_jitter = False
-        if randaug is None:
-            randaug = False
-
-        augs = []
-        if spatial_jitter:
-            augs.append(v2.ScaleJitter(
-                target_size=(model_crop_resolution[1], model_crop_resolution[0]),
-                scale_range=(0.85, 1.1)
-            ))
-            augs.append(v2.RandomCrop(size=model_crop_resolution,
-                                      pad_if_needed=True))
-        else:
-            augs.append(v2.CenterCrop(size=model_crop_resolution))
-
-        if randaug:
-            augs.append(v2.RandAugment(
-                num_ops=2, magnitude=5
-            ))
-        augs.append(v2.Resize(model_resolution))
-
-        self.augmentations = v2.Compose(augs)
-
-    def process_video(self, vid):
-        return self.augmentations(vid)
-
-
-class FinetuneTrainer(Trainer):
-    """Huggingface trainer override adding BCE loss and dynamic class weights
-    to the training loop.
-    """
-    def __init__(self, weight: Optional[torch.tensor] = None,
-                 label_smoothing: Optional[float] = None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if label_smoothing is None:
-            label_smoothing = 0
-
-        # Create gaussian kernels
-        self.gaussian_kernel = torch.autograd.Variable(
-            torch.FloatTensor(
-                [[[0.01, 0.15, 1, 0.15, 0.01]]])
-        )
-        self.smoothing = label_smoothing
-        self.confidence = 1 - self.smoothing
-        self.do_smoothing = label_smoothing > 0.00001
-
-        self.label_smoothing = label_smoothing
-
-        if weight is not None:
-            if isinstance(weight, float):
-                weight = [weight]
-            self.weight = torch.tensor(weight)
-        else:
-            self.weight = weight
-
-    def training_step(self, model: nn.Module, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Small override which generates and injects the patch masks into the
-        input.
-        """
-        inputs["pixel_values"] = v2.functional.to_dtype(
-            inputs["pixel_values"], torch.float32, scale=True
-        )
-        return super(FinetuneTrainer, self).training_step(model, inputs)
-
-    def prediction_step(
-            self,
-            model: nn.Module,
-            inputs: dict[str, torch.Tensor],
-            prediction_loss_only: bool,
-            ignore_keys: Optional[list[str]] = None,
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[
-               torch.Tensor]]:
-        inputs["pixel_values"] = v2.functional.to_dtype(
-            inputs["pixel_values"], torch.float32, scale=True
-        )
-        return super(FinetuneTrainer, self).prediction_step(
-            model, inputs, prediction_loss_only, ignore_keys)
-
-    def compute_loss(self, model, inputs, return_outputs=False):
-        labels = inputs.get("labels")
-
-        # forward pass
-        outputs = model(**inputs)
-        logits = outputs.get("logits")
-
-        n_positive = torch.sum(labels) / 2
-
-        # Apply label smoothing
-        if self.do_smoothing:
-            with torch.no_grad():
-                pos_labels = labels > 0.00001
-                neg_labels = labels < 0.00001
-                labels = torch.squeeze(torch.nn.functional.conv1d(
-                    labels[:, None, :], self.gaussian_kernel.to(labels.device),
-                    padding=2
-                ), dim=1)
-                labels[neg_labels] += self.smoothing / labels.shape[1]
-                labels[labels > 1] = 1
-
-                labels[pos_labels] *= self.confidence
-                n_positive *= self.confidence
-
-        # compute loss using BCE
-        if self.weight is not None:
-            loss_fct = nn.BCEWithLogitsLoss(
-                pos_weight=self.weight.to(logits.device))
-        else:
-            if n_positive < 1:
-                weight = torch.tensor(88.).to(logits.device)
-            else:
-                weight = (torch.numel(labels)-n_positive) / n_positive
-            loss_fct = nn.BCEWithLogitsLoss(
-                pos_weight=weight
-            )
-        loss = loss_fct(logits, labels)
-        return (loss, outputs) if return_outputs else loss
 
 
 class WandbFinetunePredictionProgressCallback(WandbCallback):
@@ -322,12 +197,15 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
             batch_size=num_samples,
             shuffle=True
         )))
-        self.train_imgs = v2.functional.grayscale_to_rgb(
-            sample_train_dataset["pixel_values"]
-        )
-        self.sample_dataset["pixel_values"] = v2.functional.to_dtype(
-            self.sample_dataset["pixel_values"], torch.float32, scale=True
-        )
+        # In order to visualize the images we unnormalize them.
+        unnormalize = v2.Compose([
+            v2.Normalize(
+               mean=-torch.tensor(IMAGENET_MEAN) / torch.tensor(IMAGENET_STD),
+               std=1/torch.tensor(IMAGENET_STD)
+            ),
+            v2.ToDtype(torch.uint8, scale=True)
+        ])
+        self.train_imgs = unnormalize(sample_train_dataset["pixel_values"])
         self.labs = self.sample_dataset["label_ids"]
         self.videos_run = False
         self.freq = freq
@@ -367,7 +245,6 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
                     preds = model(
                         pixel_values=sample["pixel_values"],
                         labels=sample["label_ids"],
-                        return_dict=True
                     )
                 logits = preds["logits"].cpu()
                 for i in range(logits.shape[0]):

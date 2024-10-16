@@ -1,14 +1,13 @@
 #!/bin/bash
 #SBATCH --partition=GPU
-#SBATCH --job-name=cls_sgd
-#SBATCH --nodelist=gpu003
+#SBATCH --job-name=small-pi
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --time=06:00:00
 #SBATCH --output=./logs/run%j.out
 #SBATCH --mem=0
-#SBATCH --gpus=2
+#SBATCH --gres=gpu:2
 #SBATCH --exclusive
 
 # --------------------------------------------------------------------
@@ -25,46 +24,41 @@ fi
 # Load .env file
 set -a; source .env; set +a
 
-# Check that the Accelerate config file exists
-ACCELERATE_CONFIG_LOC="${MLP_ACCELERATE_CONFIG:-./accelerate_config.yaml}"
-if [ ! -f "$ACCELERATE_CONFIG_LOC" ]; then
-    echo "Please create the Accelerate config file before running this
-    script by running 'accelerate config --config_file $ACCELERATE_CONFIG_LOC'"
-    exit 1
-fi
+module load cuda/12.1
 
 # Add our ffmpeg binary to the path since it's not installed system-wide.
 export PATH=$PPAN_FFMPEG_LOC:$PATH
 
-module load cuda
+# Load the virtual environment
+source "$PPAN_VIRTUALENV"
 
-# It's very important to recreate the virtualenv every time the job
-# starts, as we want to guarantee that all our modules are correctly
-# installed on the current node we're running on.
-if [ -d "./venv" ]; then
-  rm -r ./.venv
-fi
-
-#  Create a virtual env using the provided Python
-"$PPAN_PYTHON_PREFIX"/bin/python3 -m venv .venv
-
-source ./.venv/bin/activate
-
-# Install wheel and upgrade pip
-python -m pip install --upgrade pip
-pip install wheel
-pip install pybind11
-# We have to manually install some packages first because madmoms
-# deps are broken.
-pip install Cython
-pip install numpy
-pip install git+https://github.com/CPJKU/madmom
-pip install accelerate
 # Install PPAN
 pip install "$PPAN_REPO_ROOT"
 
-# Run the script
-accelerate launch --config_file "$ACCELERATE_CONFIG_LOC" "$PPAN_REPO_ROOT"/ppan "$1"
+# In case the SLURM cluster doesn't have a DNS, we find the IP address of the
+# main node manually.
+NNODES=$SLURM_NNODES
+NUM_PROCESSES=$(expr $NNODES \* $GPUS_PER_NODE)
+MASTER_HOSTNAME=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+MASTER_ADDR_FULL=$(scontrol getaddrs $MASTER_HOSTNAME)
+IFS=':' read -ra HOSTNAME_SPLIT <<< $MASTER_ADDR_FULL
 
-# Clean up the virtualenv after we're done
-rm -r ./.venv
+MASTER_ADDR="$(echo -e "${HOSTNAME_SPLIT[1]}" | tr -d '[:space:]')"
+MASTER_PORT=6000
+
+echo "Master address: $MASTER_ADDR"
+
+export LAUNCHER="accelerate launch \
+    --main_process_ip $MASTER_ADDR \
+    --main_process_port $MASTER_PORT \
+    --machine_rank \$SLURM_PROCID \
+    --num_processes $NUM_PROCESSES \
+    --num_machines $NNODES \
+    "
+
+export PROGRAM="$PPAN_REPO_ROOT/ppan $1"
+export CMD="$LAUNCHER $PROGRAM"
+
+srun --jobid $SLURM_JOBID bash -c "$CMD" 2>&1 | tee -a $LOG_PATH
+
+deactivate
