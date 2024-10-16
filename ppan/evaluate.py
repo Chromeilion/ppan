@@ -17,7 +17,7 @@ from scipy.ndimage import gaussian_filter
 from torch import no_grad
 from tqdm import tqdm
 
-from ppan.config import fps, temporal_res, device, processed_temporal_size
+from ppan.config import fps, temporal_res, device, processed_temporal_size, model_no_frames
 from ppan.utils import load_all_data
 from ppan.midi import PPAnMidi
 from ppan.preprocessor import PPAnEvalDataset
@@ -68,6 +68,7 @@ def evaluate(preds_output: PathLike,
 #    dataset_names = ["omaps", "rach3", "miditest", "pianoyt"]
     datasets = [rach3_test, miditest, pianoyt_test]
     dataset_names = ["rach3", "miditest", "pianoyt"]
+
     [evaluate_on_dataset(
         i,
         dataset_name=j,
@@ -82,10 +83,10 @@ def evaluate(preds_output: PathLike,
 def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
                         gaussian_sigma, threshold, midi_output):
     preds_output = Path(dataset_name+"_preds.pkl")
-    model = PPANModel.from_pretrained(
-        model_checkpoint
-    ).eval().to(device)
     if not preds_output.exists():
+        model = PPANModel.from_pretrained(
+            model_checkpoint
+        ).eval().to(device)
         processor = PPANVideoProcessor()
         dataset = PPAnEvalDataset(
             datasets=samples,
@@ -101,11 +102,19 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
         with open(preds_output, "wb") as f:
             pickle.dump(obj=preds_rach3, file=f)
     else:
-        try:
-            with open(preds_output, "rb") as f:
-                preds_rach3 = pickle.load(f)
-        except:
-            return
+        with open(preds_output, "rb") as f:
+            preds_rach3 = pickle.load(f)
+            # The saved preds may be from a different machine, therefore,
+            # we fix the paths here.
+
+        fixed_preds = {}
+        for key, val in preds_rach3.items():
+            p_name = Path(key).name
+            all_vid_names = [Path(i[2]).name for i in samples]
+            fixed_preds[samples[all_vid_names.index(p_name)][2]] = preds_rach3[key]
+
+        preds_rach3 = fixed_preds
+
     mir_stats = np.zeros(4)
     all_stats = []
     all_vid_paths = []
@@ -113,7 +122,7 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
         video_len = float(MultimediaTools().ff_probe(vid_path)["streams"][0]["duration"])
         pred_step = video_len / max([i[1] for i in preds])
         preds = [(i[0], i[1]*pred_step) for i in preds]
-        final_pred = calc_time(preds, model)
+        final_pred = calc_time(preds)
         onset_array = final_pred_to_onset_array(final_pred, threshold,
                                                 gaussian_sigma)
         onset_array = onset_array.astype(int) * 100
@@ -292,9 +301,9 @@ def calc_stats(midi: PPAnMidi, onset_array: np.ndarray):
     return mir_scores
 
 
-def calc_time(preds, model):
+def calc_time(preds):
     final_preds = []
     for pred, times in preds:
-        time = times + (model.config.num_frames/fps)/2
+        time = times + model_no_frames/2
         final_preds.append((time, pred))
     return final_preds
