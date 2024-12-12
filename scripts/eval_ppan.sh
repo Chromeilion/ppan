@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=GPU
-#SBATCH --job-name=small-pi
+#SBATCH --job-name=evaluate
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24

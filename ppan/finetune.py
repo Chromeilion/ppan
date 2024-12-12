@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Optional, Union
 from multiprocessing import Manager
-from random import choices, shuffle
+from random import choices
 
 import torch
 import torchvision.transforms.v2 as v2
@@ -14,11 +14,10 @@ from transformers import (
     Trainer
 )
 from transformers.integrations import WandbCallback
-
-from ppan.config import (seed, num_labels,
-                         finetune_default, IMAGENET_STD, IMAGENET_MEAN)
-from ppan.dataset import (PPANDataset, get_samples)
-from ppan.model import PPANModel, PPANConfig, PPANVideoProcessor
+from timm.data.constants import IMAGENET_DEFAULT_STD, IMAGENET_DEFAULT_MEAN
+from ppan.config import seed, num_labels, finetune_default
+from ppan.dataset import PPANDataset, get_samples, DatasetConfig, OutputMap
+from ppan.model import PPANModel, PPANConfig, PPANVideoProcessor, PPANCollate
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -78,46 +77,75 @@ def train(dataset_dir: PathLike,
     rotate_180 = finetune_default["rotate_180"]
     rand_erase = finetune_default["rand_erase"]
     mask_percentage = finetune_default["mask_percentage"]
+    gaussian_noise = finetune_default["gaussian_noise"]
+    color_jitter = finetune_default["color_jitter"]
+    do_mixup = finetune_default["do_mixup"]
+    mixup_alpha = finetune_default["mixup_alpha"]
+    dataloader_cache = os.environ.get("PPAN_DATALOADER_CACHE", None)
+    if dataloader_cache is None:
+        dataloader_cache = True
+    else:
+        dataloader_cache = False
 
     load_dotenv()
     dataset_dir = Path(dataset_dir)
     processor = PPANVideoProcessor(randaug=randaug,
                                    spatial_jitter=spatial_jitter,
                                    rotate_180=rotate_180,
-                                   rand_erase=rand_erase)
+                                   rand_erase=rand_erase,
+                                   gaussian_noise=gaussian_noise,
+                                   color_jitter=color_jitter)
 
     # Remap the default dataset output dictionary keys to what our model expects
-    output_map = {"vid": "pixel_values", "lab": "label_ids", "mask": None}
-
-    train_samples: list = get_samples(dataset_dir/"train")
-    # Going through the entire val set while training is too time-consuming.
-    validation_samples = choices(get_samples(dataset_dir/"test"), k=1000)
+    output_map: OutputMap = {"vid": "pixel_values",
+                             "onsets": "onsets",
+                             "frames": "frames"}
 
     # In order to avoid redundant copies of frames being cached, we
     # create a shared dictionary that can be used as a cache by all
     # dataset workers.
-    manager = Manager()
-    shared_dict_train = manager.dict()
-    shared_dict_test = manager.dict()
-    model = PPANModel(PPANConfig()).train()
-    train_ds = PPANDataset(
+    shared_dict_train, shared_dict_test = None, None
+    if dataloader_cache:
+        manager = Manager()
+        shared_dict_train = manager.dict()
+        shared_dict_test = manager.dict()
+
+    config = PPANConfig(
+        do_smoothing=finetune_default["do_smoothing"],
+        confidence=finetune_default["confidence"],
+        dropout=finetune_default["dropout"],
+        drop_path=finetune_default["drop_path"],
+        do_mixup=do_mixup,
+        mixup_alpha=mixup_alpha,
+        loss_fn=finetune_default["loss_fn"]
+    )
+    collate_fn = PPANCollate(config)
+    model = PPANModel(config).train()
+    train_ds_config = DatasetConfig(
         video_processor=processor,
-        samples=train_samples,
         output_map=output_map,
-        shared_dict=shared_dict_train,
-        temporal_jitter=temporal_jitter,
-        mask_percentage=mask_percentage,
-        tubelet_size=(model.pretrained_model.config.tubelet_size,
-                      model.pretrained_model.config.patch_size,
-                      model.pretrained_model.config.patch_size)
+        stride=finetune_default["stride"],
+        window_size=finetune_default["window_size"],
+        lenience=finetune_default["lenience"],
+        shared_dict=shared_dict_train
+    )
+    train_ds = PPANDataset(
+        config=train_ds_config,
+        root=dataset_dir/"train",
+    )
+    test_ds_config = DatasetConfig(
+        video_processor=processor,
+        output_map=output_map,
+        stride=finetune_default["stride"],
+        window_size=finetune_default["window_size"],
+        lenience=finetune_default["lenience"],
+        shared_dict=shared_dict_test,
+        max_samples=1024
     )
     val_ds = PPANDataset(
-        video_processor=PPANVideoProcessor(),
-        samples=validation_samples,
-        output_map=output_map,
-        shared_dict=shared_dict_test
+        root=dataset_dir/"test",
+        config=test_ds_config
     )
-
     training_arguments = TrainingArguments(
         ddp_find_unused_parameters=False,
         num_train_epochs=no_epochs,
@@ -128,6 +156,7 @@ def train(dataset_dir: PathLike,
         learning_rate=learning_rate,
         do_train=True,
         do_eval=True,
+        dataloader_pin_memory=True,
         lr_scheduler_type=scheduler_type,
         warmup_ratio=warmup_ratio,
         seed=seed,
@@ -136,14 +165,22 @@ def train(dataset_dir: PathLike,
         per_device_eval_batch_size=batch_size,
         report_to=["wandb"],
         dataloader_num_workers=os.cpu_count() // 4 - 1,
+        dataloader_prefetch_factor=2,
         log_on_each_node=False,
         save_total_limit=4,
-        max_grad_norm=finetune_default["grad_clip"]
+        max_grad_norm=finetune_default["grad_clip"],
+        label_names=list(output_map.values())
     )
-    optimizer = torch.optim.AdamW(
+#    optimizer = torch.optim.AdamW(
+#        model.parameters(),
+#        lr=finetune_default["lr_adamw"],
+#        betas=(adam_beta1, adam_beta2),
+#        weight_decay=weight_decay
+#    )
+    optimizer = torch.optim.SGD(
         model.parameters(),
-        lr=finetune_default["lr_adamw"],
-        betas=(adam_beta1, adam_beta2),
+        lr=finetune_default["lr_sgd"],
+        momentum=finetune_default["momentum"],
         weight_decay=weight_decay
     )
     trainer = Trainer(
@@ -151,12 +188,14 @@ def train(dataset_dir: PathLike,
         args=training_arguments,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        optimizers=(optimizer, None)
+        optimizers=(optimizer, None),
+        data_collator=collate_fn
     )
     progress_callback = WandbFinetunePredictionProgressCallback(
         trainer=trainer,
         train_dataset=train_ds,
-        val_dataset=val_ds
+        val_dataset=val_ds,
+        train_collate_fn=collate_fn
     )
     trainer.add_callback(progress_callback)
     trainer.train(resume_from_checkpoint=checkpoint_dir)
@@ -166,11 +205,12 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
     """Custom WandbCallback to log model predictions during training.
 
     This callback logs model predictions and labels to a wandb.Table at each
-    logging step during training. It allows to visualize the
+    logging step during training. It allows us to visualize the
     model predictions as the training progresses.
     """
 
     def __init__(self, trainer, val_dataset, train_dataset,
+                 train_collate_fn=None, test_collate_fn=None,
                  num_samples=20, freq=1):
         """Initializes the WandbPredictionProgressCallback instance.
 
@@ -190,32 +230,37 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
         self.sample_dataset = next(iter(DataLoader(
             val_dataset,
             batch_size=num_samples,
-            shuffle=True
+            shuffle=True,
+            collate_fn=test_collate_fn
         )))
         sample_train_dataset = next(iter(DataLoader(
             train_dataset,
             batch_size=num_samples,
-            shuffle=True
+            shuffle=True,
+            collate_fn=train_collate_fn
         )))
         # In order to visualize the images we unnormalize them.
         unnormalize = v2.Compose([
             v2.Normalize(
-               mean=-torch.tensor(IMAGENET_MEAN) / torch.tensor(IMAGENET_STD),
-               std=1/torch.tensor(IMAGENET_STD)
+               mean=-torch.tensor(IMAGENET_DEFAULT_MEAN) / torch.tensor(IMAGENET_DEFAULT_STD),
+               std=1/torch.tensor(IMAGENET_DEFAULT_STD)
             ),
             v2.ToDtype(torch.uint8, scale=True)
         ])
-        self.train_imgs = unnormalize(sample_train_dataset["pixel_values"])
-        self.labs = self.sample_dataset["label_ids"]
+        self.train_imgs = unnormalize(sample_train_dataset["pixel_values"]).to("cpu")
+        self.onsets = self.sample_dataset["onsets"][:, :, None].to("cpu")
+        self.frames = self.sample_dataset["frames"][:, :, None].to("cpu")
         self.videos_run = False
         self.freq = freq
 
     def add_preds_image(self, logits: torch.Tensor, target: torch.Tensor,
                         lab: str, step: int):
-        img_t = v2.functional.resize(target[None, :, None],
-                                     [num_labels, num_labels // 4])
-        img_p = v2.functional.resize(logits[None, :, None],
-                                     [num_labels, num_labels // 4])
+        img_t = v2.functional.resize(target[None, :],
+                                     [num_labels, num_labels // 2],
+                                     interpolation=v2.InterpolationMode.NEAREST)
+        img_p = v2.functional.resize(logits[None, :],
+                                     [num_labels, num_labels // 2],
+                                     interpolation=v2.InterpolationMode.NEAREST)
         img_f = torch.cat((img_t, img_p), dim=2)
         self._wandb.log(
             {lab: wandb.Image(img_f)},
@@ -242,15 +287,12 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
                         k: v.to(device=model.device) for k, v in
                         self.sample_dataset.items()
                     }
-                    preds = model(
-                        pixel_values=sample["pixel_values"],
-                        labels=sample["label_ids"],
-                    )
-                logits = preds["logits"].cpu()
+                    preds = model(**sample)
+                logits = preds["logits"].cpu().permute(0, 2, 1)
                 for i in range(logits.shape[0]):
                     self.add_preds_image(
                         torch.squeeze(logits[i]),
-                        target=torch.squeeze(self.labs[i]),
-                        lab=f"True Labels vs Model Predictions {i}",
+                        target=torch.squeeze(torch.cat([self.onsets[i], self.frames[i]], dim=1)),
+                        lab=f"True vs Pred (Onsets Then Frames) {i}",
                         step=state.global_step
                     )

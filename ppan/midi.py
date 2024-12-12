@@ -26,12 +26,11 @@ class PPAnMidi:
     PIANO_SHIFT = 21
 
     def __init__(self, n_frames: int, temporal_res: float,
-                 lenience: int, percentage_negative: float = 0.08):
+                 lenience: int, percentage_negative: float = 0.05):
 
         self.midi_filepath = None
         self._performance = None
         self._pianoroll = None
-        self.midi_file = None
         self._note_array = None
         self.percentage_negative = percentage_negative
         self.time_div = self.TIME_DIV
@@ -41,6 +40,8 @@ class PPAnMidi:
         self.piano_shift = self.PIANO_SHIFT
 
         self._oo_array = None
+        self._f_array = None
+        self._midi_file = None
         self.temporal_res = temporal_res
         self.lenience = lenience
         self.n_frames = n_frames
@@ -50,15 +51,50 @@ class PPAnMidi:
         if self._oo_array is None:
             _oo_array = np.zeros(shape=(num_labels,
                                         self.n_frames),
-                                 dtype=np.bool_)
+                                 dtype=np.double)
             for note in self.performance.performedparts[0].notes:
-                note_on_frame = round(note['note_on'] / self.temporal_res)
+                note_on_frame = min(round(note['note_on'] / self.temporal_res), _oo_array.shape[1]-1)
                 _oo_array[
                 note['midi_pitch'] - self.PIANO_SHIFT,
-                note_on_frame - self.lenience:note_on_frame + self.lenience + 1
+                note_on_frame
                 ] = 1
+                if note_on_frame - self.lenience >= 0:
+                    _oo_array[
+                    note['midi_pitch'] - self.PIANO_SHIFT,
+                    note_on_frame - self.lenience
+                    ] = 0.5
+                if note_on_frame + self.lenience < self.n_frames:
+                    _oo_array[
+                        note['midi_pitch'] - self.PIANO_SHIFT,
+                        note_on_frame + self.lenience
+                    ] = 0.5
             self._oo_array = _oo_array
         return self._oo_array
+
+    @property
+    def f_array(self) -> npt.NDArray[np.bool_]:
+        if self._f_array is None:
+            _f_array = np.zeros(shape=(num_labels,self.n_frames), dtype=np.double)
+            for note in self.performance.performedparts[0].notes:
+                note_on_frame = round(note['note_on'] / self.temporal_res)
+                note_off_frame = min(round(note['note_off'] / self.temporal_res), _f_array.shape[1]-1)
+                _f_array[
+                note['midi_pitch'] - self.PIANO_SHIFT,
+                note_on_frame:note_off_frame+1
+                ] = 1
+                if note_on_frame - self.lenience >= 0:
+                    _f_array[
+                    note['midi_pitch'] - self.PIANO_SHIFT,
+                    note_on_frame - self.lenience
+                    ] = 0.5
+                if note_off_frame + self.lenience < _f_array.shape[1]:
+                    _f_array[
+                    note['midi_pitch'] - self.PIANO_SHIFT,
+                    note_off_frame + self.lenience
+                    ] = 0.5
+
+            self._f_array = _f_array
+        return self._f_array
 
     def __call__(self, time: float | int, device: torch.device,
                  dtype: torch.dtype):
@@ -92,6 +128,12 @@ class PPAnMidi:
 
         return octave * self.notes_in_octave + note_no + self.piano_shift
 
+    @property
+    def midi_file(self):
+        if self._midi_file is None:
+            self._midi_file = mido.MidiFile(self.midi_filepath)
+        return self._midi_file
+
     def set_midi(self, midi_filepath):
         """
         Set a new midi file in the object. Resets all the cached objects such
@@ -102,11 +144,12 @@ class PPAnMidi:
         midi_filepath : str
         """
         self.midi_filepath = midi_filepath
-        self.midi_file = mido.MidiFile(midi_filepath)
+        self._midi_file = None
         self._performance = None
         self._pianoroll = None
         self._note_array = None
         self._oo_array = None
+        self._f_array = None
         return self
 
     @property
@@ -123,7 +166,6 @@ class PPAnMidi:
     def performance(self) -> Performance:
         if self._performance is None:
             self._performance = pt.load_performance_midi(self.midi_filepath)
-
         return self._performance
 
     @property
@@ -141,8 +183,8 @@ class PPAnMidi:
                 ).toarray().astype(bool)
         return self._pianoroll
 
-    def generate_filelist_labs(self, name, lab, pad: int) -> str:
-        threshold_mask = self.oo_array.max(0)
+    def gen_sample_list(self, name, lab, pad: int):
+        threshold_mask = np.logical_or(self.oo_array, self.f_array).max(0)
         non_zero = np.where(threshold_mask)[0]
         zero = np.where(~threshold_mask)[0]
         res_list_pos = self._segment(name, lab, non_zero)
@@ -160,7 +202,11 @@ class PPAnMidi:
             filename, lab, start, end in full_list
         ]
         final_list = [i for i in final_list if i[3] - i[2] >= pad+1+pad]
-        return "\n".join([" ".join([str(j) for j in i]) for i in final_list])
+        return final_list
+
+    def generate_filelist_labs(self, name, lab, pad: int) -> str:
+        sample_list = self.gen_sample_list(name, lab, pad)
+        return "\n".join([" ".join([str(j) for j in i]) for i in sample_list])
 
     @staticmethod
     def _rebalance(max_frames: float, old_list: list,

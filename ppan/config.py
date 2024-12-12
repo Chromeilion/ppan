@@ -14,6 +14,8 @@ manual_seed(seed)
 random.seed(seed)
 np.random.seed(seed)
 
+frame_hd5_file = "r3s_processed.hdf5"
+
 # Useful for typing
 PathLike = Union[str, bytes, PathLike]
 
@@ -35,16 +37,13 @@ TEST_TRAIN_SPLIT = tuple[list[SAMPLE_TYPE], list[SAMPLE_TYPE]]
 
 # Default model resolution
 model_crop_resolution = (122, 720)
-#model_resolution = (64, 784) # The image gets slightly stretched.
-model_resolution = (64, 704)
+# The resolution is set to specifically have the same number of pixels as
+# the pretraining resolution.
+model_resolution = (64, 784)
 model_no_channels = 3
 model_no_frames = 6
 frame_stride = 1
 frames_per_ds_sample = 6
-
-# For image normalization
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
 
 # The number of keys on a (regular) piano
 num_labels = 88
@@ -58,32 +57,44 @@ temporal_res = 1/fps
 
 # The size of a processed sample before applying final model specific
 # preprocessing
-processed_temporal_size = 7 * temporal_res
+processed_temporal_size = 64 * temporal_res
 processed_horizontal_res = 720
 
-PRETRAINED_MODEL_BASE = "MCG-NJU/videomae-base"
-PRETRAINED_MODEL_SMALL = "MCG-NJU/videomae-small-finetuned-kinetics"
+PRETRAINED_MODEL_BASE = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/mae-b/pytorch_model.bin"
+PRETRAINED_MODEL_SMALL = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/distill/vit_s_k710_dl_from_giant.pth"
 
 # Default pretraining settings
+no_epochs = 15
 finetune_default = {
-    "no_epochs": 10,
-    "batch_size": 64,
-    "lr_sgd": 3e-4,
-    "lr_adamw": 5e-4,
+    "no_epochs": no_epochs,
+    "batch_size": 95,
+    "lr_sgd": 0.25,
+    "lr_adamw": 1e-3,
     "adam_beta1": 0.9,
     "adam_beta2": 0.999,
-    "weight_decay": 0.03,
-    "warmup_ratio": 1/10,  # 0.5 epochs of warmup
+    "weight_decay": 0.,
+    "warmup_ratio": 2.5/no_epochs,
     "scheduler_type": "cosine",
     "eval_every": 250,
     "save_every": 250,
     "randaug": True,
-    "temporal_jitter": True,
+    "temporal_jitter": False,
     "spatial_jitter": True,
     "rand_erase": False,
-    "rotate_180": True,
+    "rotate_180": False,
+    "gaussian_noise": False,
+    "color_jitter": False,
     "dropout": 0.,
+    "drop_path": 0.,
     "momentum": 0.9,
-    "grad_clip": 1,
-    "mask_percentage": None
+    "grad_clip": 1.,
+    "mask_percentage": None,
+    "do_smoothing": False,
+    "confidence": 0.9,
+    "do_mixup": False,
+    "mixup_alpha": 0.2,
+    "stride": 1,
+    "window_size": 6,
+    "lenience": 1,
+    "loss_fn": "bce"
 }

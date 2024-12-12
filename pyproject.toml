@@ -29,7 +29,9 @@ dependencies = [
     "wandb",
     "av",
     "moviepy",
-    "imageio"
+    "imageio",
+    "timm",
+    "h5py"
 ]
 
 [project.urls]

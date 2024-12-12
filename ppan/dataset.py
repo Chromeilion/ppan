@@ -1,11 +1,15 @@
+from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, TypedDict, Any
 import random
+from dataclasses import dataclass
 
-from ppan.config import frames_per_ds_sample, frame_stride, model_resolution
-from ppan.utils import RunningCellMaskingGenerator
+from ppan.midi import PPAnMidi
+from ppan.config import frame_hd5_file
+
+import h5py
 import numpy as np
 import numpy.typing as npt
 import torch
@@ -13,6 +17,7 @@ import torch.nn as nn
 import torchvision
 from torch.utils.data import Dataset
 
+device = "cpu"
 
 class OutputMap(TypedDict):
     """Template for a dictionary that controls the names and presence of the
@@ -20,8 +25,8 @@ class OutputMap(TypedDict):
     gets loaded.
     """
     vid: Optional[str]
-    lab: Optional[str]
-    mask: Optional[str]
+    frames: Optional[str]
+    onsets: Optional[str]
 
 
 class BaseVideoProcessor(nn.Module, ABC):
@@ -38,6 +43,16 @@ class BaseVideoProcessor(nn.Module, ABC):
     def forward(self, x) -> torch.tensor:
         return self.process_video(x)
 
+@dataclass
+class DatasetConfig:
+    video_processor: BaseVideoProcessor
+    output_map: OutputMap
+    stride: int # Step size between consecutive frames in a window
+    window_size: int
+    lenience: int
+    shared_dict: Optional[dict[str, Any]] = None
+    max_samples: Optional[int] = None
+
 
 class PPANDataset(Dataset):
     """
@@ -45,130 +60,159 @@ class PPANDataset(Dataset):
     The provided dataset should have already been pre-processed with
     PPANPreProcessor.
     """
-    FRAME_PREFIX: str = "frame_"
-    FRAME_EXTENSION: str = ".jpeg"
-    LABEL_FILENAME: str = "labels.pt"
-
-    def __init__(self, samples: list[Path],
-                 video_processor: BaseVideoProcessor,
-                 output_map: Optional[OutputMap] = None,
-                 shared_dict=None,
-                 temporal_jitter: Optional[bool] = None,
-                 mask_percentage: Optional[float] = None,
-                 tubelet_size: Optional[tuple[int, int, int]] = None) -> None:
-        if temporal_jitter is None:
-            temporal_jitter = False
-        if tubelet_size is None and mask_percentage is not None:
-            raise AttributeError("Please provide the tubelet size when using "
-                                 "masking")
-        self.temporal_jitter = temporal_jitter
-
-        samples = sorted([str(i) for i in samples])
-        # Store samples in a numpy array to avoid refcounts blowing up the
-        # memory usage.
-        self.samples: npt.NDArray[bytes] = np.array(samples).astype(np.bytes_)
-        self.no_frames = frames_per_ds_sample
-        self.stride = frame_stride
-
-        self.frame_idxs: npt.NDArray[int] = self._calc_frame_file_idxs()
-
-        if mask_percentage is None:
-            self.mask_key = None
-            if output_map is not None:
-                output_map["mask"] = None
-        else:
-            frame_patches = self.no_frames // tubelet_size[0]
-            h_patches = model_resolution[0] // tubelet_size[1]
-            w_patches = model_resolution[1] // tubelet_size[2]
-            self.mask_generator = RunningCellMaskingGenerator(
-                input_size=(frame_patches, h_patches, w_patches),
-                mask_ratio=mask_percentage
-            )
-            self.mask_key: Optional[str] = "lab"
-
+    def __init__(self, root: Path, config: DatasetConfig) -> None:
+        self.root = root
+        self._hd5_frame = None
+        self.config = config
+        self.samples = self._load_samples()
+        if self.config.max_samples is not None:
+            self.samples = random.choices(self.samples, k=self.config.max_samples)
         self.vid_key: Optional[str] = "vid"
-        self.lab_key: Optional[str] = "lab"
+        self.onsets_key: Optional[str] = "onsets"
+        self.frames_key: Optional[str] = "frames"
 
-        if output_map is not None:
-            self.vid_key = output_map["vid"]
-            self.lab_key = output_map["lab"]
-            self.mask_key = output_map["mask"]
+        if config.output_map is not None:
+            self.vid_key = config.output_map["vid"]
+            self.onsets_key = config.output_map["onsets"]
+            self.frames_key = config.output_map["frames"]
 
-        self.video_processor: BaseVideoProcessor = video_processor
-        self.shared_dict: Optional[dict[str, Any]] = shared_dict
+        self.video_processor: BaseVideoProcessor = config.video_processor
+        self.cache: Optional[dict[str, Any]] = config.shared_dict
 
-    @staticmethod
-    def _load_lab(filepath: str) -> torch.Tensor:
-        return torch.squeeze(torch.load(
-            filepath,
-            weights_only=True)).float()
+    @property
+    def hd5_frame(self):
+        if self._hd5_frame is None:
+            self._hd5_frame = h5py.File(str(self.root / frame_hd5_file), "r")
+        return self._hd5_frame
+
+    def _load_samples(self) -> list[tuple[int, ProcessedSampleWrapper]]:
+        videos = list(self.hd5_frame.keys())
+        samples = []
+        for i in videos:
+            frames = self.hd5_frame[i]["frames"]
+            video_wrap = ProcessedSampleWrapper(frames, i, self.root/f"{i}.midi", self.root/f"{i}_video_details.txt", self.config)
+            for j in video_wrap.get_samples():
+                samples += [(j, video_wrap)]
+
+        return samples
 
     def _get_lab(self, idx):
-        return self._load_lab(str(Path(
-            self.samples[idx].decode()) / self.LABEL_FILENAME))
-
-    @staticmethod
-    def _calc_frame_file_idxs() -> npt.NDArray[int]:
-        """Get the filenames of all the frames we want to load per sample.
-        """
-        return np.array([0, 1, 2, 3, 4, 5])
-
-    def get_frame_files(self, idxs: npt.NDArray[int]) -> list[str]:
-        files = []
-        for frame_no in idxs:
-            files.append(
-                self.FRAME_PREFIX + str(frame_no) + self.FRAME_EXTENSION)
-        return files
-
-    def _read_file(self, filepath):
-        if self.shared_dict is not None:
-            if str(filepath) not in self.shared_dict:
-                data = torchvision.io.read_file(filepath).numpy()
-                self.shared_dict[str(filepath)] = data
-            return torch.tensor(self.shared_dict[str(filepath)])
-        return torchvision.io.read_file(filepath)
+        sample = self.samples[idx]
+        onset = sample[1].midi_wrapper.oo_array[..., sample[0]]
+        frame = sample[1].midi_wrapper.f_array[..., sample[0]]
+        return {"onsets": onset, "frames": frame}
 
     def _get_vid(self, idx) -> torch.Tensor:
         """Load a video from the saved frames in a sample
         """
         sample = self.samples[idx]
-        path = Path(sample.decode())
-
-        if self.temporal_jitter:
-            jitter = random.choice([0, 1])
-        else:
-            jitter = 0
-
-        frames = [torchvision.io.decode_jpeg(
-            self._read_file(str(path / frame))) for frame in
-            self.get_frame_files(self.frame_idxs + jitter)]
-
-        video = torch.stack(frames, dim=0)
+        video = sample[1].video_wrapper.get_frame_window(sample[0])
         return self.video_processor(video)
-
-    @staticmethod
-    def _get_midpoint(no_frames) -> int:
-        """Calculate the middle frame index in a list of frames.
-        """
-        return int(no_frames // 2) + 1
 
     def __len__(self):
         return len(self.samples)
 
-    def _get_mask(self):
-        mask = torch.tensor(self.mask_generator(), dtype=torch.bool)
-        return mask.flatten()
-
     def __getitem__(self, idx) -> (tuple[torch.Tensor, torch.Tensor] |
                                    dict[str, torch.Tensor]):
         out = {}
-        if self.mask_key is not None:
-            out[self.mask_key] = self._get_mask()
         if self.vid_key is not None:
             out[self.vid_key] = self._get_vid(idx)
-        if self.lab_key is not None:
-            out[self.lab_key] = self._get_lab(idx)
+        if self.onsets_key is not None:
+            labs = self._get_lab(idx)
+            out[self.onsets_key] = torch.tensor(labs["onsets"], device=device).float()
+            out[self.frames_key] = torch.tensor(labs["frames"], device=device).float()
         return out
+
+
+class ProcessedSampleWrapper:
+    """Helper for handling each individual sample. Keeps track of the frame and
+    MIDI objects and provides a sampler.
+    """
+    MIDI_FILE = "data.midi"
+    def __init__(self, frames, cache_prefix: str, midi_path: Path, details_file: Path, config: DatasetConfig) -> None:
+        self.config = config
+        self.video_wrapper = FramedVideoWrapper(
+            details_file,
+            frames,
+            window_size=config.window_size,
+            stride=config.stride,
+            cache_prefix=cache_prefix,
+            cache_dict=config.shared_dict
+        )
+        self.midi_wrapper: PPAnMidi = PPAnMidi(
+            n_frames=self.video_wrapper.n_frames,
+            temporal_res=self.video_wrapper.frametime,
+            lenience=config.lenience
+        ).set_midi(str(midi_path))
+
+    def get_samples(self):
+        n_frames = self.video_wrapper.n_frames
+        half_window = self.config.window_size // 2
+        samples = list(range(half_window, n_frames-half_window))
+        return samples
+
+
+class FramedVideoWrapper:
+    """Convenience class that can handle automatically loading frames from a
+    processed video folder.
+    """
+    FRAME_PREFIX: str = "frame_"
+    FRAME_EXTENSION: str = ".jpeg"
+    DETAILS_FILE: str = "video_details.txt"
+
+    def __init__(self, details_file, frame_data, window_size: int, stride: int, cache_prefix: str, cache_dict: Optional[dict] = None):
+        self.details_file = details_file
+        self.frames = frame_data
+        self.n_frames: int = frame_data.shape[0]
+        self._duration = None
+        self.frametime: float =  self.duration / self.n_frames
+        self.frame_idxs = np.array([i * stride for i in range(-window_size//2, window_size//2)])
+        self.cache: Optional[dict] = cache_dict
+        self.cache_prefix = cache_prefix
+        self.cache_index = torch.tensor([False for _ in range(self.frames.shape[0])], dtype=torch.bool)
+
+    @property
+    def duration(self) -> float:
+        if self._duration is None:
+            with open(self.details_file) as f:
+                details = [i.split(": ") for i in f.readlines()]
+            details = {
+                key: val for key, val in details
+            }
+            self._duration = float(details["duration"])
+        return self._duration
+
+    def get_frames(self, frames: npt.NDArray[int]):
+        if self.cache is not None:
+            not_in_cache = ~self.cache_index[frames]
+            if torch.any(not_in_cache):
+                for i in torch.where(not_in_cache)[0]:
+                    frame_data = self.frames[frames[i]]
+                    self.cache[self.cache_prefix+str(int(frames[i]))] = frame_data
+                    self.cache_index[frames[i]] = True
+
+            return [torch.tensor(self.cache[self.cache_prefix+str(int(i))]) for i in frames]
+
+        return [torch.tensor(i) for i in self.frames[frames]]
+
+    def get_video(self, frames: npt.NDArray[int]):
+        frame_data = self.get_frames(frames)
+        frames_decoded = torchvision.io.decode_jpeg(frame_data,
+                                            device=device)
+        video = torch.stack(frames_decoded, dim=0)
+        return video
+
+    def get_time_window(self, time: float):
+        """Get a window into the video centered at a certain time.
+        """
+        frame = round(time / self.frametime)
+        return self.get_frame_window(frame)
+
+    def get_frame_window(self, frame: int):
+        """Get a window into the video centered at a certain frame.
+        """
+        idxs = self.frame_idxs + frame
+        return self.get_video(idxs)
 
 
 def get_samples(root: Path):

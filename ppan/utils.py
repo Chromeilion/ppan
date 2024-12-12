@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 from typing import Optional
+from collections import OrderedDict
 
 import torchvision.transforms.v2 as v2
 from tqdm import tqdm
@@ -15,7 +16,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from rach3datautils.utils.dataset import DatasetUtils
+from timm import create_model
 
+import ppan.model_mae
 from ppan.config import PathLike, SAMPLE_TYPE, TEST_TRAIN_SPLIT
 
 
@@ -115,7 +118,9 @@ def load_miditest(root) -> list[SAMPLE_TYPE]:
     none = [None for _ in midi_files]
     true = [True for _ in midi_files]
     false = [False for _ in midi_files]
-    return list(zip(midi_files, none, videos, none, true, false))
+    # Zoom in slightly
+    crop = [[0, 336, 30, 1877] for _ in midi_files]
+    return list(zip(midi_files, none, videos, crop, true, false))
 
 
 def load_all_data(rach3_dir: Optional[PathLike] = None,
@@ -255,7 +260,7 @@ class AsymmetricLossOptimized(nn.Module):
     ''' Notice - optimized version, minimizes memory allocation and gpu uploading,
     favors inplace operations'''
 
-    def __init__(self, gamma_neg=4, gamma_pos=1, clip=0.05, eps=1e-8, disable_torch_grad_focal_loss=False):
+    def __init__(self, gamma_neg=4, gamma_pos=1, clip=0.05, eps=1e-6, disable_torch_grad_focal_loss=False):
         super(AsymmetricLossOptimized, self).__init__()
 
         self.gamma_neg = gamma_neg
@@ -388,3 +393,126 @@ class RunningCellMaskingGenerator:
     def __call__(self):
         mask = self.all_mask_maps[np.random.randint(self.cell_size)]
         return np.copy(mask)
+
+
+def load_state_dict(model,
+                    state_dict,
+                    prefix='',
+                    ignore_missing="relative_position_index"):
+    missing_keys = []
+    unexpected_keys = []
+    error_msgs = []
+    # copy state_dict so _load_from_state_dict can modify it
+    metadata = getattr(state_dict, '_metadata', None)
+    state_dict = state_dict.copy()
+    if metadata is not None:
+        state_dict._metadata = metadata
+
+    def load(module, prefix=''):
+        local_metadata = {} if metadata is None else metadata.get(
+            prefix[:-1], {})
+        module._load_from_state_dict(state_dict, prefix, local_metadata, True,
+                                     missing_keys, unexpected_keys, error_msgs)
+        for name, child in module._modules.items():
+            if child is not None:
+                load(child, prefix + name + '.')
+
+    load(model, prefix=prefix)
+
+    warn_missing_keys = []
+    ignore_missing_keys = []
+    for key in missing_keys:
+        keep_flag = True
+        for ignore_key in ignore_missing.split('|'):
+            if ignore_key in key:
+                keep_flag = False
+                break
+        if keep_flag:
+            warn_missing_keys.append(key)
+        else:
+            ignore_missing_keys.append(key)
+
+    missing_keys = warn_missing_keys
+
+    if len(missing_keys) > 0:
+        print("Weights of {} not initialized from pretrained model: {}".format(
+            model.__class__.__name__, missing_keys))
+    if len(unexpected_keys) > 0:
+        print("Weights from pretrained model not used in {}: {}".format(
+            model.__class__.__name__, unexpected_keys))
+    if len(ignore_missing_keys) > 0:
+        print(
+            "Ignored weights of {} not initialized from pretrained model: {}".
+            format(model.__class__.__name__, ignore_missing_keys))
+    if len(error_msgs) > 0:
+        print('\n'.join(error_msgs))
+
+def get_vit(config):
+    """Load a VideoMAEv2 checkpoint and return the model. Based on code
+    from:
+    https://github.com/OpenGVLab/VideoMAEv2/
+    """
+    model = create_model(
+        config.model,
+        img_size=config.image_size,
+        pretrained=False,
+        all_frames=config.num_frames,
+        tubelet_size=config.tubelet_size,
+        drop_rate=config.dropout,
+        drop_path_rate=config.drop_path,
+        attn_drop_rate=config.attn_drop_rate,
+        head_drop_rate=config.head_drop_rate,
+        drop_block_rate=None,
+        with_cp=False,
+        num_classes=88
+    )
+    checkpoint = torch.hub.load_state_dict_from_url(
+        config.pretrained_encoder, map_location='cpu', check_hash=True)
+
+    print("Load ckpt from %s" % config.model)
+    checkpoint_model = None
+    for model_key in config.model_key.split('|'):
+        if model_key in checkpoint:
+            checkpoint_model = checkpoint[model_key]
+            print("Load state_dict by model_key = %s" % model_key)
+            break
+    if checkpoint_model is None:
+        checkpoint_model = checkpoint
+    for old_key in list(checkpoint_model.keys()):
+        if old_key.startswith('_orig_mod.'):
+            new_key = old_key[10:]
+            checkpoint_model[new_key] = checkpoint_model.pop(old_key)
+
+    state_dict = model.state_dict()
+    for k in ['head_1.weight', 'head_1.bias']:
+        if k in checkpoint_model and checkpoint_model[
+            k].shape != state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint_model[k]
+    for k in ['head_2.weight', 'head_2.bias']:
+        if k in checkpoint_model and checkpoint_model[
+            k].shape != state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint_model[k]
+
+    all_keys = list(checkpoint_model.keys())
+    new_dict = OrderedDict()
+    for key in all_keys:
+        if key.startswith('backbone.'):
+            new_dict[key[9:]] = checkpoint_model[key]
+        elif key.startswith('encoder.'):
+            new_dict[key[8:]] = checkpoint_model[key]
+        else:
+            new_dict[key] = checkpoint_model[key]
+    checkpoint_model = new_dict
+
+    load_state_dict(
+        model, checkpoint_model)
+
+    n_parameters = sum(p.numel() for p in model.parameters()
+                       if p.requires_grad)
+
+    print("Model = %s" % str(model))
+    print('number of params:', n_parameters)
+
+    return model

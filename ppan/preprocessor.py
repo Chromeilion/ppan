@@ -2,6 +2,7 @@ import os
 from abc import abstractmethod
 from pathlib import Path
 from typing import Optional, Callable
+import subprocess
 
 import nvidia.dali.fn as fn
 import nvidia.dali.plugin.pytorch.fn as pfn
@@ -11,35 +12,28 @@ import torchvision.transforms.functional as functional
 import torchvision.transforms.v2 as v2
 from nvidia.dali import pipeline_def
 from nvidia.dali.plugin.pytorch import DALIGenericIterator
-from rach3datautils.utils.multimedia import MultimediaTools
 from torch.utils.data import IterableDataset
 from torchvision import tv_tensors
 
 from ppan.config import seed, SAMPLE_TYPE, processed_horizontal_res
-from ppan.midi import PPAnMidi
 from ppan.model import PPANVideoProcessor
 
 
-class BaseDatasetProcessor(IterableDataset):
+class DatasetProcessor(IterableDataset):
     """
-    Base class for PPAn datasets.
+    Processor class that converts videos into cropped frames.
     """
     def __init__(
             self,
             datasets: SAMPLE_TYPE,
             batch_size: int,
             epoch_size: Optional[int] = None,
-            frame_transform: Optional[Callable[[torch.tensor],
-                                               torch.tensor]] = None,
+            frame_transform: Optional[Callable[[torch.tensor], torch.tensor]] = None,
             video_transform: Optional[PPANVideoProcessor] = None,
             temporal_res: Optional[float] = None,
             temporal_size: Optional[float] = None,
             dataset_max_framerate: Optional[int] = None,
-            step: Optional[int] = None,
-            cachefile_name: Optional[str] = None,
-            max_iters_per_epoch: Optional[int] = None,
-            target_epoch: Optional[int] = None,
-            pretrain: Optional[bool] = None
+            cachefile_name: Optional[str] = None
     ):
         """
         Parameters
@@ -52,63 +46,41 @@ class BaseDatasetProcessor(IterableDataset):
             Transformation applied to the entire video clip at once
         temporal_res : Optional[float]
             The distance in seconds between yielded frames.
-        step : Optional[int]
-            The amount of frames between consecutive sequences
         """
         if temporal_res is None:
             temporal_res = 1/30
         if temporal_size is None:
-            temporal_size = 7/30
+            temporal_size = 32/30
         if dataset_max_framerate is None:
             dataset_max_framerate = 30
         if epoch_size is None:
             epoch_size = 1
-        if step is None:
-            step = 1
         if cachefile_name is None:
             cachefile_name = "./ppan_cache.txt"
-        if pretrain is None:
-            pretrain = False
 
-        self.pretrain = pretrain
         self.batch_size = batch_size
-        self.lenience = 1
-        self.max_iters_per_epoch = max_iters_per_epoch
         self.cachefile_name = cachefile_name
-        self.step = step
         self.dataset = datasets
         self.temporal_res = temporal_res
         self.temporal_size = temporal_size
         dataset_frametime = 1 / dataset_max_framerate
-        self.no_frames_per_clip = int(self.temporal_size // dataset_frametime) + 2*self.lenience
+        self.no_frames_per_clip = int(self.temporal_size // dataset_frametime)
+        self.step = self.no_frames_per_clip
         self.temporal_res_frames = int(self.temporal_size // self.temporal_res)
         self.epoch_size: int = epoch_size
 
         self.frame_transform = frame_transform
         self.video_transform = video_transform
         self._file_list = None
-        self.midi_cache: dict[int, PPAnMidi] = {}
-
         self._augment = None
-        r_resize_int = os.environ.get(
-            "PPAN_AUG_CROP_JITTER", None)
-        if r_resize_int is not None:
-            r_resize_int = tuple([int(i) for i in r_resize_int.split(":")])
-        self.rand_resize_interval: Optional[tuple[int, int]] = r_resize_int
-        self.do_stack: bool = os.environ.get("PPAN_AUG_STACK", "True") == "True"
         self.dali_iter = self.get_iter()
-
-        if target_epoch is not None:
-            self.target_iteration = len(self) * target_epoch
 
     def __call__(self, *args, **kwargs):
         return self.__iter__()
 
     def __len__(self):
         iter_len = len(self.dali_iter) * int(os.environ.get("PPAN_NO_GPU", 1))
-        if self.max_iters_per_epoch is None:
-            return self.epoch_size * iter_len
-        return self.epoch_size * min(iter_len, self.max_iters_per_epoch)
+        return self.epoch_size * iter_len
 
     def __iter__(self) -> dict[str, torch.Tensor]:
         for epoch in range(self.epoch_size):
@@ -117,27 +89,39 @@ class BaseDatasetProcessor(IterableDataset):
                 for val in vals:
                     yield self.finish_processing(val)
                     iter_no += 1
-                    if self.max_iters_per_epoch is not None:
-                        if iter_no >= self.max_iters_per_epoch:
-                            break
-                if self.max_iters_per_epoch is not None:
-                    if iter_no >= self.max_iters_per_epoch:
-                        break
+
             # New epoch, we need to start from zero with the iterator
             self.dali_iter.reset()
 
-    @abstractmethod
     def finish_processing(self, vals):
-        ...
+        return {'pixel_values': vals['pixel_values'],
+                'sample': self.dataset[vals['label'].item()],
+                'times': vals['timestamps']}
 
-    @abstractmethod
     def get_video_reader(self, num_gpus, d_id) -> fn.readers.video:
-        ...
+        return fn.readers.video(
+            device="gpu",
+            file_list=self.file_list(),
+            enable_frame_num=True,
+            sequence_length=self.no_frames_per_clip,
+            file_list_frame_num=True,
+            shard_id=d_id,
+            file_list_include_preceding_frame=True,
+            name=f"VideoReader",
+            step=self.step,
+            num_shards=num_gpus,
+            pad_last_batch=True,
+            pad_sequences=True
+        )
 
     @property
-    @abstractmethod
     def augmentations(self):
-        ...
+        if self._augment is None:
+            self._augment = torch.nn.Sequential(
+                v2.Resize(max_size=processed_horizontal_res,
+                          size=None)
+            )
+        return self._augment
 
     def get_iter(self):
         n = int(os.environ.get("PPAN_NO_GPU", 1))
@@ -155,27 +139,10 @@ class BaseDatasetProcessor(IterableDataset):
         ]
         dali_iter = DALIGenericIterator(
             pipes,
-            ['pixel_values', 'label', 'note_vec', 'timestamps'],
+            ['pixel_values', 'label', 'timestamps'],
             reader_name="VideoReader"
         )
         return dali_iter
-
-    def get_midi(self, sample_idx) -> PPAnMidi:
-        """Get the PPaNMidi object for a sample. All objects are
-        automatically cached for future use.
-        """
-        if sample_idx not in self.midi_cache:
-            sample = self.dataset[sample_idx]
-            vid_meta = MultimediaTools().ff_probe(sample[2])
-            n_frames = int(vid_meta["streams"][0]["nb_frames"])
-            midi_path = sample[0]
-            midi = PPAnMidi(temporal_res=self.temporal_res,
-                            lenience=self.lenience,
-                            n_frames=n_frames)
-            midi.set_midi(midi_path)
-            self.midi_cache[sample_idx] = midi
-
-        return self.midi_cache[sample_idx]
 
     @staticmethod
     def plot_image(img_tensor: torch.Tensor):
@@ -194,21 +161,6 @@ class BaseDatasetProcessor(IterableDataset):
         bbx = v2.ConvertBoundingBoxFormat("XYWH")(box)
         return functional.crop(
             video, bbx[0, 0], bbx[0, 1], bbx[0, 2], bbx[0, 3])
-
-    def midi_pipe_pytorch(self, label: torch.Tensor,
-                          timestamps: torch.Tensor):
-        """Load labels from the correct MIDI file.
-        """
-        if self.dataset[label[0].item()][0] is None:
-            return torch.tensor([0], device=label.device)
-        midi: PPAnMidi = self.get_midi(label[0].item())
-        time = int(timestamps.item() + self.temporal_res_frames // 2)
-        notes_vec = midi(
-            time,
-            device=label.device,
-            dtype=torch.bool
-        )
-        return notes_vec.float()
 
     def video_pipe_pytorch(self, video: torch.Tensor,
                            label: torch.Tensor):
@@ -236,10 +188,6 @@ class BaseDatasetProcessor(IterableDataset):
         if rotate_180:
             video = functional.rotate(video, 180)
 
-        if len(sample) >= 7:
-            if sample[6] is not None:
-                video = functional.hflip(video)
-
         # Apply augmentations to the cropped video
         video = self.augmentations(video)
 
@@ -253,13 +201,19 @@ class BaseDatasetProcessor(IterableDataset):
         return self.cachefile_name
 
     def _get_file_list(self) -> str:
-        pad = int((self.temporal_size // self.temporal_res) // 2)
         file_list = []
         for sample_idx in range(len(self.dataset)):
-            file_list.append(self.get_midi(
-                sample_idx
-            ).generate_filelist_labs(
-                self.dataset[sample_idx][2], sample_idx, pad)
+            sample = self.dataset[sample_idx]
+            n_frames = int(subprocess.run(
+                f"ffprobe -v error -select_streams v:0 -count_packets "
+                f"-show_entries stream=nb_read_packets -of csv=p=0 "
+                f"{sample[2]}".split(" "), capture_output=True).stdout.decode())
+
+            file_list.append(
+                f"{self.dataset[sample_idx][2]} "
+                f"{sample_idx} "
+                f"0 "
+                f"{n_frames}"
             )
         tot = []
         [tot.extend(i.split("\n")) for i in file_list]
@@ -275,84 +229,4 @@ class BaseDatasetProcessor(IterableDataset):
             video, label,
             function=self.video_pipe_pytorch
         )
-        note_vec = pfn.torch_python_function(
-            label,
-            timestamps,
-            function=self.midi_pipe_pytorch
-        )
-        return video, label, note_vec, timestamps
-
-
-class PPAnDatasetProcessor(BaseDatasetProcessor):
-    """
-    Dataset object for training on a video/midi dataset such as Rach3.
-    Handles loading, preprocessing, and batching all necessary files.
-    """
-    @property
-    def augmentations(self):
-        if self._augment is None:
-            self._augment = torch.nn.Sequential(
-                v2.Resize(max_size=processed_horizontal_res,
-                          size=None)
-            )
-        return self._augment
-
-    def finish_processing(self, vals):
-        return {'pixel_values': vals['pixel_values'],
-                'labels': vals['note_vec'],
-                'sample': self.dataset[vals['label'].item()]}
-
-    def get_video_reader(self, num_gpus, d_id) -> fn.readers.video:
-        return fn.readers.video(
-            device="gpu",
-            file_list=self.file_list(),
-            enable_frame_num=True,
-            sequence_length=self.no_frames_per_clip,
-            file_list_frame_num=True,
-            shard_id=d_id,
-            random_shuffle=True,
-            file_list_include_preceding_frame=True,
-            name=f"VideoReader",
-            step=self.step,
-            num_shards=num_gpus
-        )
-
-
-class PPAnEvalDataset(BaseDatasetProcessor):
-    """
-    For evaluating on a video/midi dataset. Loads clips sequentially and
-    returns the timestamp.
-    """
-    @property
-    def augmentations(self):
-        if self._augment is None:
-            self._augment = torch.nn.Sequential(
-                v2.Resize(max_size=processed_horizontal_res,
-                          size=None),
-                self.video_transform
-            )
-        return self._augment
-
-    def finish_processing(self, vals):
-        return {'pixel_values': vals['pixel_values'],
-                'labels': vals['note_vec'],
-                'timestamps': vals['timestamps'],
-                'file_idx': vals['label']}
-
-    def get_all_video_samples(self):
-        return [str(i[2]) for i in self.dataset]
-
-    def get_video_reader(self, num_gpus, d_id) -> fn.readers.video:
-        return fn.readers.video(
-            device="gpu",
-            filenames=self.get_all_video_samples(),
-            labels=[],
-            enable_frame_num=True,
-            sequence_length=self.no_frames_per_clip,
-            shard_id=d_id,
-            num_shards=num_gpus,
-            random_shuffle=False,
-            name="VideoReader",
-            step=1,
-            file_list_include_preceding_frame=True
-        )
+        return video, label, timestamps

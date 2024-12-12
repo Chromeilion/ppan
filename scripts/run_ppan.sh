@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --partition=GPU
-#SBATCH --job-name=small-pi
-#SBATCH --nodes=1
+#SBATCH --job-name=multi-small-sgd
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --time=06:00:00
