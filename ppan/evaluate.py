@@ -57,7 +57,7 @@ def evaluate(preds_output: PathLike,
         batch_size = 2
     else:
         batch_size = int(batch_size)
-    gaussian_sigma = 1
+    gaussian_sigma = 0.8
 
     # TODO: Get up to date with the rest of the codebase
     _, _, miditest, pianoyt_test, rach3_test = load_all_data(
@@ -168,7 +168,7 @@ def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
     """
     pred_array = np.array([i[1] for i in final_pred]).astype(float)
     pred_array = gaussian_filter(pred_array, axes=[0], sigma=sigma,
-                                 radius=6)
+                                 radius=8)
     pred_array = pred_array > threshold
     revised_preds = []
     nonzero_preds = pred_array.nonzero()
