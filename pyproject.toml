@@ -31,6 +31,7 @@ dependencies = [
     "moviepy",
     "imageio",
     "timm",
+    "pynvml",
     "h5py"
 ]
 

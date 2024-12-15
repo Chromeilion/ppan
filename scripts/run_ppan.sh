@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=GPU
-#SBATCH --job-name=multi-small-sgd
+#SBATCH --job-name=onset-frames-detection
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
@@ -25,6 +25,8 @@ fi
 set -a; source .env; set +a
 
 module load cuda/12.1
+module load openBLAS/0.3.26
+module load openMPI/4.1.6/gnu/14.2.1
 
 # Add our ffmpeg binary to the path since it's not installed system-wide.
 export PATH=$PPAN_FFMPEG_LOC:$PATH
@@ -54,6 +56,7 @@ export LAUNCHER="accelerate launch \
     --machine_rank \$SLURM_PROCID \
     --num_processes $NUM_PROCESSES \
     --num_machines $NNODES \
+    --multi_gpu \
     "
 
 export PROGRAM="$PPAN_REPO_ROOT/ppan $1"

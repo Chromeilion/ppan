@@ -13,11 +13,13 @@ from transformers import (
     TrainingArguments,
     Trainer
 )
+from torch.multiprocessing import set_start_method
 from transformers.integrations import WandbCallback
 from timm.data.constants import IMAGENET_DEFAULT_STD, IMAGENET_DEFAULT_MEAN
 from ppan.config import seed, num_labels, finetune_default
 from ppan.dataset import PPANDataset, get_samples, DatasetConfig, OutputMap
 from ppan.model import PPANModel, PPANConfig, PPANVideoProcessor, PPANCollate
+
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -117,10 +119,8 @@ def train(dataset_dir: PathLike,
         drop_path=finetune_default["drop_path"],
         do_mixup=do_mixup,
         mixup_alpha=mixup_alpha,
-        loss_fn=finetune_default["loss_fn"]
+        loss_fn=finetune_default["loss_fn"],
     )
-    collate_fn = PPANCollate(config)
-    model = PPANModel(config).train()
     train_ds_config = DatasetConfig(
         video_processor=processor,
         output_map=output_map,
@@ -129,6 +129,8 @@ def train(dataset_dir: PathLike,
         lenience=finetune_default["lenience"],
         shared_dict=shared_dict_train
     )
+    collate_fn = PPANCollate(config)
+    model = PPANModel(config).train()
     train_ds = PPANDataset(
         config=train_ds_config,
         root=dataset_dir/"train",
@@ -164,8 +166,8 @@ def train(dataset_dir: PathLike,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         report_to=["wandb"],
-        dataloader_num_workers=os.cpu_count() // 4 - 1,
-        dataloader_prefetch_factor=2,
+        dataloader_num_workers=18 - 1,
+        dataloader_prefetch_factor=1,
         log_on_each_node=False,
         save_total_limit=4,
         max_grad_norm=finetune_default["grad_clip"],
@@ -239,15 +241,7 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
             shuffle=True,
             collate_fn=train_collate_fn
         )))
-        # In order to visualize the images we unnormalize them.
-        unnormalize = v2.Compose([
-            v2.Normalize(
-               mean=-torch.tensor(IMAGENET_DEFAULT_MEAN) / torch.tensor(IMAGENET_DEFAULT_STD),
-               std=1/torch.tensor(IMAGENET_DEFAULT_STD)
-            ),
-            v2.ToDtype(torch.uint8, scale=True)
-        ])
-        self.train_imgs = unnormalize(sample_train_dataset["pixel_values"]).to("cpu")
+        self.train_imgs = sample_train_dataset["pixel_values"].to("cpu")
         self.onsets = self.sample_dataset["onsets"][:, :, None].to("cpu")
         self.frames = self.sample_dataset["frames"][:, :, None].to("cpu")
         self.videos_run = False

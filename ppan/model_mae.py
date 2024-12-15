@@ -345,7 +345,7 @@ class VisionTransformer(nn.Module):
                  init_scale=0.,
                  all_frames=16,
                  tubelet_size=2,
-                 use_mean_pooling=False,
+                 use_mean_pooling=True,
                  with_cp=False,
                  cos_attn=False,
                  *_, **__):
@@ -361,7 +361,7 @@ class VisionTransformer(nn.Module):
             embed_dim=embed_dim,
             num_frames=all_frames,
             tubelet_size=tubelet_size)
-        num_patches = self.patch_embed.num_patches + 2 if not use_mean_pooling else self.patch_embed.num_patches
+        num_patches = self.patch_embed.num_patches
         self.with_cp = with_cp
 
         if use_learnable_pos_emb:
@@ -373,8 +373,6 @@ class VisionTransformer(nn.Module):
                 num_patches, embed_dim)
 
         self.pos_drop = nn.Dropout(p=drop_rate)
-
-        self.cls_tokens = nn.Parameter(torch.zeros(1, 2, embed_dim)) if not use_mean_pooling else None
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)
                ]  # stochastic depth decay rule
@@ -392,15 +390,11 @@ class VisionTransformer(nn.Module):
                 init_values=init_values,
                 cos_attn=cos_attn) for i in range(depth)
         ])
-        self.norm_1 = nn.Identity() if use_mean_pooling else norm_layer(
-            embed_dim)
-        self.norm_2 = nn.Identity() if use_mean_pooling else norm_layer(
+        self.norm = nn.Identity() if use_mean_pooling else norm_layer(
             embed_dim)
         self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
         self.head_dropout = nn.Dropout(head_drop_rate)
-        self.head_1 = nn.Linear(
-            embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        self.head_2 = nn.Linear(
+        self.head = nn.Linear(
             embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
         if use_learnable_pos_emb:
@@ -408,11 +402,8 @@ class VisionTransformer(nn.Module):
 
         self.apply(self._init_weights)
 
-        nn.init.normal_(self.cls_tokens, std=1e-6)
-        self.head_1.weight.data.mul_(init_scale)
-        self.head_1.bias.data.mul_(init_scale)
-        self.head_2.weight.data.mul_(init_scale)
-        self.head_2.bias.data.mul_(init_scale)
+        self.head.weight.data.mul_(init_scale)
+        self.head.bias.data.mul_(init_scale)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -435,17 +426,13 @@ class VisionTransformer(nn.Module):
 
     def reset_classifier(self, num_classes, global_pool=''):
         self.num_classes = num_classes
-        self.head_1 = nn.Linear(
-            self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        self.head_2 = nn.Linear(
+        self.head = nn.Linear(
             self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x):
         B = x.size(0)
 
         x = self.patch_embed(x)
-        if self.cls_tokens is not None:
-            x = torch.cat([x, self.cls_tokens.expand(B, -1, -1)], dim=1)
 
         if self.pos_embed is not None:
             x = x + self.pos_embed.expand(B, -1, -1).type_as(x).to(
@@ -461,14 +448,13 @@ class VisionTransformer(nn.Module):
         if self.fc_norm is not None:
             return self.fc_norm(x.mean(1))
         else:
-            return self.norm_1(x[:, -2]), self.norm_2(x[:, -1])
+            return self.norm(x[:, 0])
 
     def forward(self, x):
-        x_onset, x_frame = self.forward_features(x)
-        x_onset, x_frame = self.head_dropout(x_onset), self.head_dropout(x_frame)
-        x_onset = self.head_1(x_onset)
-        x_frame = self.head_2(x_frame)
-        return x_onset, x_frame
+        x = self.forward_features(x)
+        x = self.head_dropout(x)
+        x = self.head(x)
+        return x
 
 
 @register_model

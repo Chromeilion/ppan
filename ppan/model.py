@@ -9,6 +9,7 @@ from ppan.utils import AsymmetricLossOptimized, get_vit
 from ppan.dataset import BaseVideoProcessor
 from torchvision.tv_tensors import Video
 import torchvision.transforms.v2 as v2
+from ppan.config import device
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 
@@ -41,6 +42,8 @@ class PPANConfig(PretrainedConfig):
             bce_loss_weight_frame: float = 2,
             do_mixup: bool = False,
             mixup_alpha: float = 0.,
+            img_mean: float = IMAGENET_DEFAULT_MEAN,
+            img_std: float = IMAGENET_DEFAULT_STD,
             **kwargs,
     ):
         self.dropout = dropout
@@ -68,6 +71,8 @@ class PPANConfig(PretrainedConfig):
         self.bce_weight_frame = bce_loss_weight_frame
         self.do_mixup = do_mixup
         self.mixup_alpha = mixup_alpha
+        self.img_mean = img_mean
+        self.img_std = img_std
         super().__init__(**kwargs)
 
 
@@ -96,13 +101,13 @@ class PPANModel(PreTrainedModel):
             self.onset_loss_fn = nn.BCEWithLogitsLoss(
                 pos_weight=torch.tensor(config.bce_weight_onset)
             )
+        self.normalizer = v2.Compose([v2.ToDtype(torch.float32, scale=True),
+                                      v2.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD)])
 
     def forward(self, pixel_values: torch.Tensor, onsets=None, frames=None):
         # If no batch dimension was supplied, we add it.
         if len(pixel_values.shape) == 4:
             pixel_values = torch.unsqueeze(pixel_values, dim=0)
-        if onsets is None and frames is None:
-            raise AttributeError("Both onsets and frames cannot be None!!!")
         if len(pixel_values.shape) != 5:
             raise AttributeError("The supplied video clip has an unexpected "
                                  "shape!!! It should be BTCHW.")
@@ -112,8 +117,10 @@ class PPANModel(PreTrainedModel):
         if pixel_values.shape[3] != self.config.image_size[0] or pixel_values.shape[4] != self.config.image_size[1]:
             raise AttributeError("Incorrect image size given to the model!!!")
 
-        pixel_values = pixel_values.permute(0, 2, 1, 3, 4)
-        logits_onset, logits_frame = self.pretrained_model(pixel_values)
+        pixel_values = self.normalizer(pixel_values).permute(0, 2, 1, 3, 4)
+        logits = self.pretrained_model(pixel_values)
+        logits_onset = logits[:, :88]
+        logits_frame = logits[:, 88:]
 
         if onsets is not None or frames is not None:
             loss = self.get_loss(logits_onset, logits_frame, onsets, frames)
@@ -187,10 +194,7 @@ class PPANVideoProcessor(BaseVideoProcessor):
             augs.append(v2.RandomApply([v2.RandomRotation([180, 180])], p=0.5))
 
         augs.append(v2.Resize(model_resolution))
-        augs.append(v2.ToDtype(torch.float32, scale=True))
-        if gaussian_noise:
-            augs.append(v2.RandomApply([v2.GaussianNoise()], p=0.5))
-        augs.append(v2.Normalize(mean=IMAGENET_DEFAULT_MEAN, std=IMAGENET_DEFAULT_STD))
+
         self.augmentations = v2.Compose(augs)
 
     def process_video(self, vid):
@@ -205,6 +209,7 @@ class PPANCollate:
 
     def __call__(self, *args, **kwargs):
         batch = self.default_collate(*args, **kwargs)
+
         if self.config.do_mixup:
             vid = Video(batch["pixel_values"])
             mixed = self.mixup(vid, batch["onsets"], batch["frames"])

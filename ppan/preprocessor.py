@@ -33,7 +33,8 @@ class DatasetProcessor(IterableDataset):
             temporal_res: Optional[float] = None,
             temporal_size: Optional[float] = None,
             dataset_max_framerate: Optional[int] = None,
-            cachefile_name: Optional[str] = None
+            cachefile_name: Optional[str] = None,
+            step: Optional[int] = None
     ):
         """
         Parameters
@@ -65,7 +66,9 @@ class DatasetProcessor(IterableDataset):
         self.temporal_size = temporal_size
         dataset_frametime = 1 / dataset_max_framerate
         self.no_frames_per_clip = int(self.temporal_size // dataset_frametime)
-        self.step = self.no_frames_per_clip
+        if step is None:
+            step = self.no_frames_per_clip
+        self.step = step
         self.temporal_res_frames = int(self.temporal_size // self.temporal_res)
         self.epoch_size: int = epoch_size
 
@@ -95,7 +98,7 @@ class DatasetProcessor(IterableDataset):
 
     def finish_processing(self, vals):
         return {'pixel_values': vals['pixel_values'],
-                'sample': self.dataset[vals['label'].item()],
+                'sample': [self.dataset[i] for i in vals['label']],
                 'times': vals['timestamps']}
 
     def get_video_reader(self, num_gpus, d_id) -> fn.readers.video:
@@ -190,7 +193,8 @@ class DatasetProcessor(IterableDataset):
 
         # Apply augmentations to the cropped video
         video = self.augmentations(video)
-
+        if self.video_transform is not None:
+            video = self.video_transform(video)
         return video
 
     def file_list(self) -> str:

@@ -75,6 +75,7 @@ def save_dataset(ds, out_dir):
     n_frames_tracker = defaultdict(lambda: 0)
     with h5py.File(out_dir/frame_hd5_file, "w") as f:
         for file_idx, i in enumerate(tqdm.tqdm(ds, desc="Processing dataset")):
+            i["sample"] = i["sample"][0]
             # Each individual video gets put into its own directory
             group_name = Path(i['sample'][2]).stem
             if group_name not in f:

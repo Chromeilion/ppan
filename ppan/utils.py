@@ -464,7 +464,7 @@ def get_vit(config):
         head_drop_rate=config.head_drop_rate,
         drop_block_rate=None,
         with_cp=False,
-        num_classes=88
+        num_classes=88*2 # Onsets and frames
     )
     checkpoint = torch.hub.load_state_dict_from_url(
         config.pretrained_encoder, map_location='cpu', check_hash=True)

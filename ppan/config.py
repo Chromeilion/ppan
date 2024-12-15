@@ -67,7 +67,7 @@ PRETRAINED_MODEL_SMALL = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/mai
 no_epochs = 15
 finetune_default = {
     "no_epochs": no_epochs,
-    "batch_size": 95,
+    "batch_size": 96,
     "lr_sgd": 0.25,
     "lr_adamw": 1e-3,
     "adam_beta1": 0.9,

@@ -57,7 +57,7 @@ class PPAnMidi:
                 _oo_array[
                 note['midi_pitch'] - self.PIANO_SHIFT,
                 note_on_frame
-                ] = 1
+                ] = 1 # TODO: potential loss smoothing could be put here
                 if note_on_frame - self.lenience >= 0:
                     _oo_array[
                     note['midi_pitch'] - self.PIANO_SHIFT,

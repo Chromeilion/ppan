@@ -20,7 +20,7 @@ from tqdm import tqdm
 from ppan.config import fps, temporal_res, device, processed_temporal_size, model_no_frames
 from ppan.utils import load_all_data
 from ppan.midi import PPAnMidi
-from ppan.preprocessor import PPAnEvalDataset
+from ppan.preprocessor import DatasetProcessor
 from ppan.model import PPANModel, PPANVideoProcessor
 
 
@@ -52,7 +52,7 @@ def evaluate(preds_output: PathLike,
                       "the correct path to these predictions is passed in "
                       "preds_output.")
     if threshold is None:
-        threshold = 0.5
+        threshold = 0.4
     if batch_size is None:
         batch_size = 2
     else:
@@ -88,12 +88,13 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
             model_checkpoint
         ).eval().to(device)
         processor = PPANVideoProcessor()
-        dataset = PPAnEvalDataset(
+        dataset = DatasetProcessor(
             datasets=samples,
             video_transform=processor,
-            batch_size=batch_size,
-            step=1,
-            temporal_size=processed_temporal_size
+            batch_size=1,
+            temporal_size=model.config.num_frames/30,
+            epoch_size=1,
+            step=1
         )
         with no_grad():
             preds_rach3 = eval_loop(dataset=dataset,
@@ -123,21 +124,24 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
         pred_step = video_len / max([i[1] for i in preds])
         preds = [(i[0], i[1]*pred_step) for i in preds]
         final_pred = calc_time(preds)
-        onset_array = final_pred_to_onset_array(final_pred, threshold,
+        final_pred_onset = [(i[0], i[1][0].squeeze()) for i in final_pred]
+        final_pred_frame = [(i[0], i[1][1].squeeze()) for i in final_pred]
+        onset_array = final_pred_to_onset_array(final_pred_onset, threshold,
                                                 gaussian_sigma)
         onset_array = onset_array.astype(int) * 100
         session_files = [i for i in samples if os.path.basename(vid_path) in os.path.basename(str(i[2]))][0]
-        vid_len = MultimediaTools().ff_probe(session_files[2])
-        vid_len = float(vid_len["streams"][0]["duration"])
+        vid_len = MultimediaTools().get_decoded_duration(session_files[2])
         try:
             labels = session_files[6]
         except IndexError:
             labels = PPAnMidi(vid_len, temporal_res, 0)
             labels.set_midi(session_files[0])
 
+        vid_framerate = vid_len/onset_array.shape[1]
         loc_mir_stats = np.array(calc_stats(
             midi=labels,
-            onset_array=onset_array
+            onset_array=onset_array,
+            framerate=vid_framerate
         ))
         all_stats.append(loc_mir_stats)
         all_vid_paths.append(vid_path)
@@ -151,9 +155,9 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
     with open(f"./{dataset_name}_mir_stats.json", "w") as f:
         json.dump(list(mir_stats/len(all_stats)), f)
     np.save(f"./{dataset_name}_all_mir_stats", np.array(all_stats),
-            allow_pickle=False)
+            allow_pickle=True)
     np.save(f"./{dataset_name}_all_mir_stats_files", np.array(all_vid_paths),
-            allow_pickle=False)
+            allow_pickle=True)
 
 
 def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
@@ -203,12 +207,10 @@ def eval_loop(dataset, model):
         model_out = model(pixel_values)
         logits = model_out["logits"]
         preds = sig(logits)
-        all_files = dataset.get_all_video_samples()
-        for timestamps, file_idx, pred in zip(i['timestamps'].to(device),
-                                              i['file_idx'].to(device),
+        for timestamps, sample, pred in zip(i['times'].to(device),
+                                              i['sample'],
                                               preds):
-            vid_file = all_files[file_idx]
-            preds_dict[vid_file].append((pred.cpu().numpy(),
+            preds_dict[str(sample[2])].append((pred.cpu().numpy(),
                                          timestamps.cpu().numpy()))
 
     return preds_dict
@@ -250,12 +252,9 @@ def perf_to_int_pitch(perf):
 def calc_perf_eval(pred_perf, true_perf):
     est_intervals, est_pitches = perf_to_int_pitch(pred_perf)
     ref_intervals, ref_pitches = perf_to_int_pitch(true_perf)
-    # This line is necessary because the model labels are actually
-    # calculated between two frames, therefore, to align the predictions
-    # properly, we need to shift everything half a frame. I'm not kidding
-    # when I say that given perfect predictions, the score would be zero
-    # without this shift.
-    est_intervals += temporal_res / 2.
+    # Shift our predictions forward 3 frames. I'm not 100% sure why this is
+    # necessary.
+    est_intervals += 3*temporal_res
     savedir = Path("./trans_res")
     savedir.mkdir(exist_ok=True)
     resdic = {"est_intervals": [list(i) for i in list(est_intervals.astype(float))],
@@ -278,14 +277,14 @@ def calc_perf_eval(pred_perf, true_perf):
         ref_intervals=ref_intervals,
         ref_pitches=ref_pitches,
         offset_ratio=None,
-        onset_tolerance=temporal_res*3
+#        onset_tolerance=temporal_res*3
     )
 
 
-def calc_stats(midi: PPAnMidi, onset_array: np.ndarray):
+def calc_stats(midi: PPAnMidi, onset_array: np.ndarray, framerate: float):
     # MIR Eval stats
     note_array_pred = pianoroll_to_notearray(onset_array,
-                                             time_div=fps,
+                                             time_div=30,
                                              time_unit="sec")
     performance_pred = Performance(
         PerformedPart.from_note_array(

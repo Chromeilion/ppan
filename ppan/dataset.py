@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from ppan.midi import PPAnMidi
 from ppan.config import frame_hd5_file
 
-import h5py
+import  h5py
 import numpy as np
 import numpy.typing as npt
 import torch
@@ -106,7 +106,7 @@ class PPANDataset(Dataset):
         """Load a video from the saved frames in a sample
         """
         sample = self.samples[idx]
-        video = sample[1].video_wrapper.get_frame_window(sample[0])
+        video = sample[1].video_wrapper.get_frame_window(sample[0]).to(device, non_blocking=True)
         return self.video_processor(video)
 
     def __len__(self):
@@ -119,8 +119,8 @@ class PPANDataset(Dataset):
             out[self.vid_key] = self._get_vid(idx)
         if self.onsets_key is not None:
             labs = self._get_lab(idx)
-            out[self.onsets_key] = torch.tensor(labs["onsets"], device=device).float()
-            out[self.frames_key] = torch.tensor(labs["frames"], device=device).float()
+            out[self.onsets_key] = torch.tensor(labs["onsets"], device=device).to(device, non_blocking=True).float()
+            out[self.frames_key] = torch.tensor(labs["frames"], device=device).to(device, non_blocking=True).float()
         return out
 
 
@@ -197,8 +197,7 @@ class FramedVideoWrapper:
 
     def get_video(self, frames: npt.NDArray[int]):
         frame_data = self.get_frames(frames)
-        frames_decoded = torchvision.io.decode_jpeg(frame_data,
-                                            device=device)
+        frames_decoded = torchvision.io.decode_jpeg(frame_data)
         video = torch.stack(frames_decoded, dim=0)
         return video
 
