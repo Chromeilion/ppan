@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from typing import Optional, Union
 from multiprocessing import Manager
-from random import choices
 
 import torch
 import torchvision.transforms.v2 as v2
@@ -30,19 +29,28 @@ def train(dataset_dir: PathLike,
           no_epochs: Optional[int] = None,
           eval_every: Optional[int] = None,
           save_every: Optional[int] = None,
-          encoder_frozen: Optional[bool] = None,
           batch_size: Optional[int] = None,
           learning_rate: Optional[float] = None,
           weight_decay: Optional[float] = None,
           warmup_ratio: Optional[float] = None,
           scheduler_type: Optional[str] = None,
           checkpoint_dir: Optional[PathLike] = None,
+          optimizer: Optional[str] = None,
           adam_beta1: Optional[float] = None,
           adam_beta2: Optional[float] = None,
-          label_smoothing: Optional[float] = None,
-          randaug: Optional[bool] = None,
-          temporal_jitter: Optional[bool] = None,
+          momentum: Optional[float] = None,
+          label_smoothing_conf_onset: Optional[float] = None,
+          label_smoothing_conf_frame: Optional[float] = None,
           spatial_jitter: Optional[bool] = None,
+          gaussian_noise: Optional[bool] = None,
+          color_jitter: Optional[bool] = None,
+          rand_erase: Optional[bool] = None,
+          grayscale: Optional[bool] = None,
+          drop_path: Optional[float] = None,
+          dropout: Optional[float] = None,
+          rand_rotate: Optional[bool] = None,
+          frames_only: Optional[bool] = None,
+          onsets_only: Optional[bool] = None,
           *_, **__):
     if dataset_dir is None:
         raise AttributeError("The dataset directory is required for "
@@ -50,8 +58,14 @@ def train(dataset_dir: PathLike,
     if output_dir is None:
         raise AttributeError("The output directory is required for "
                              "model training.")
-    if encoder_frozen is None:
-        encoder_frozen = True
+    if frames_only is None:
+        frames_only = finetune_default["frames_only"]
+    if onsets_only is None:
+        onsets_only = finetune_default["onsets_only"]
+    if dropout is None:
+        dropout = finetune_default["dropout"]
+    if drop_path is None:
+        drop_path = finetune_default["drop_path"]
     if adam_beta1 is None:
         adam_beta1 = finetune_default["adam_beta1"]
     if adam_beta2 is None:
@@ -70,38 +84,58 @@ def train(dataset_dir: PathLike,
         eval_every = finetune_default["eval_every"]
     if save_every is None:
         save_every = finetune_default["save_every"]
-    if randaug is None:
-        randaug = finetune_default["randaug"]
-    if temporal_jitter is None:
-        temporal_jitter = finetune_default["temporal_jitter"]
     if spatial_jitter is None:
         spatial_jitter = finetune_default["spatial_jitter"]
-    rotate_180 = finetune_default["rotate_180"]
-    rand_erase = finetune_default["rand_erase"]
-    mask_percentage = finetune_default["mask_percentage"]
-    gaussian_noise = finetune_default["gaussian_noise"]
-    color_jitter = finetune_default["color_jitter"]
-    do_mixup = finetune_default["do_mixup"]
-    mixup_alpha = finetune_default["mixup_alpha"]
+    if grayscale is None:
+        grayscale = finetune_default["grayscale"]
+    if rand_erase is None:
+        rand_erase = finetune_default["rand_erase"]
+    if gaussian_noise is None:
+        gaussian_noise = finetune_default["gaussian_noise"]
+    if color_jitter is None:
+        color_jitter = finetune_default["color_jitter"]
+    if rand_rotate is None:
+        rand_rotate = finetune_default["rand_rotate"]
+    if label_smoothing_conf_frame is None:
+        label_smoothing_conf_frame = finetune_default["confidence_frame"]
+    if label_smoothing_conf_onset is None:
+        label_smoothing_conf_onset = finetune_default["confidence_onset"]
+    if optimizer is None:
+        optimizer = finetune_default["optimizer"]
+    if momentum is None:
+        momentum = finetune_default["momentum"]
+
+    load_dotenv()
+    print(f"Found {os.cpu_count()} CPUs.")
+    # Flag for disabling the dataloader cache on machines with little ram.
     dataloader_cache = os.environ.get("PPAN_DATALOADER_CACHE", None)
     if dataloader_cache is None:
         dataloader_cache = True
     else:
         dataloader_cache = False
 
-    load_dotenv()
     dataset_dir = Path(dataset_dir)
-    processor = PPANVideoProcessor(randaug=randaug,
+    processor = PPANVideoProcessor(grayscale=grayscale,
+                                   rand_rotate=rand_rotate,
                                    spatial_jitter=spatial_jitter,
-                                   rotate_180=rotate_180,
                                    rand_erase=rand_erase,
                                    gaussian_noise=gaussian_noise,
                                    color_jitter=color_jitter)
 
     # Remap the default dataset output dictionary keys to what our model expects
-    output_map: OutputMap = {"vid": "pixel_values",
-                             "onsets": "onsets",
-                             "frames": "frames"}
+    output_map: OutputMap
+    if onsets_only and not frames_only:
+        output_map = {"vid": "pixel_values",
+                      "onsets": "onsets",
+                      "frames": None}
+    elif frames_only and not onsets_only:
+        output_map = {"vid": "pixel_values",
+                      "onsets": None,
+                      "frames": "frames"}
+    else:
+        output_map = {"vid": "pixel_values",
+                      "onsets": "onsets",
+                      "frames": "frames"}
 
     # In order to avoid redundant copies of frames being cached, we
     # create a shared dictionary that can be used as a cache by all
@@ -113,13 +147,10 @@ def train(dataset_dir: PathLike,
         shared_dict_test = manager.dict()
 
     config = PPANConfig(
-        do_smoothing=finetune_default["do_smoothing"],
-        confidence=finetune_default["confidence"],
-        dropout=finetune_default["dropout"],
-        drop_path=finetune_default["drop_path"],
-        do_mixup=do_mixup,
-        mixup_alpha=mixup_alpha,
-        loss_fn=finetune_default["loss_fn"],
+        confidence_frame=label_smoothing_conf_frame,
+        confidence_onset=label_smoothing_conf_onset,
+        dropout=dropout,
+        drop_path=drop_path,
     )
     train_ds_config = DatasetConfig(
         video_processor=processor,
@@ -130,7 +161,11 @@ def train(dataset_dir: PathLike,
         shared_dict=shared_dict_train
     )
     collate_fn = PPANCollate(config)
-    model = PPANModel(config).train()
+    if pretrained_checkpoint is not None:
+        model = PPANModel(config).from_pretrained(pretrained_checkpoint).train()
+    else:
+        model = PPANModel(config).train()
+
     train_ds = PPANDataset(
         config=train_ds_config,
         root=dataset_dir/"train",
@@ -148,6 +183,24 @@ def train(dataset_dir: PathLike,
         root=dataset_dir/"test",
         config=test_ds_config
     )
+    if optimizer == "adamw":
+        if learning_rate is None:
+            learning_rate = finetune_default["lr_adamw"]
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            betas=(adam_beta1, adam_beta2),
+            weight_decay=weight_decay
+        )
+    elif optimizer == "sgd":
+        if learning_rate is None:
+            learning_rate = finetune_default["lr_sgd"]
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=learning_rate,
+            momentum=momentum,
+            weight_decay=weight_decay
+        )
     training_arguments = TrainingArguments(
         ddp_find_unused_parameters=False,
         num_train_epochs=no_epochs,
@@ -166,25 +219,14 @@ def train(dataset_dir: PathLike,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         report_to=["wandb"],
-        dataloader_num_workers=18 - 1,
+        dataloader_num_workers=int(os.environ.get("PPAN_DATASET_NO_WORKERS", os.cpu_count()//2)),
         dataloader_prefetch_factor=1,
         log_on_each_node=False,
         save_total_limit=4,
         max_grad_norm=finetune_default["grad_clip"],
         label_names=list(output_map.values())
     )
-#    optimizer = torch.optim.AdamW(
-#        model.parameters(),
-#        lr=finetune_default["lr_adamw"],
-#        betas=(adam_beta1, adam_beta2),
-#        weight_decay=weight_decay
-#    )
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        lr=finetune_default["lr_sgd"],
-        momentum=finetune_default["momentum"],
-        weight_decay=weight_decay
-    )
+
     trainer = Trainer(
         model=model,
         args=training_arguments,
@@ -242,6 +284,15 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
             collate_fn=train_collate_fn
         )))
         self.train_imgs = sample_train_dataset["pixel_values"].to("cpu")
+        # In order to visualize the images we unnormalize them.
+        unnormalize = v2.Compose([
+            v2.Normalize(
+                mean=-torch.tensor(IMAGENET_DEFAULT_MEAN) / torch.tensor(IMAGENET_DEFAULT_STD),
+                std=1 / torch.tensor(IMAGENET_DEFAULT_STD)
+            ),
+            v2.ToDtype(torch.uint8, scale=True)
+        ])
+        self.train_imgs = unnormalize(sample_train_dataset["pixel_values"])
         self.onsets = self.sample_dataset["onsets"][:, :, None].to("cpu")
         self.frames = self.sample_dataset["frames"][:, :, None].to("cpu")
         self.videos_run = False

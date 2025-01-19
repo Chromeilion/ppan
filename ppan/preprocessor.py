@@ -15,8 +15,9 @@ from nvidia.dali.plugin.pytorch import DALIGenericIterator
 from torch.utils.data import IterableDataset
 from torchvision import tv_tensors
 
-from ppan.config import seed, SAMPLE_TYPE, processed_horizontal_res
+from ppan.config import seed, processed_horizontal_res
 from ppan.model import PPANVideoProcessor
+from ppan.utils import Sample
 
 
 class DatasetProcessor(IterableDataset):
@@ -25,7 +26,7 @@ class DatasetProcessor(IterableDataset):
     """
     def __init__(
             self,
-            datasets: SAMPLE_TYPE,
+            datasets: list[Sample],
             batch_size: int,
             epoch_size: Optional[int] = None,
             frame_transform: Optional[Callable[[torch.tensor], torch.tensor]] = None,
@@ -39,8 +40,7 @@ class DatasetProcessor(IterableDataset):
         """
         Parameters
         ----------
-        datasets : SAMPLE_TYPE
-            [[midi_path, flac_path, video_path, bounding_box, rotate 180]]
+        datasets : list[Sample]
         epoch_size : Optional[int]
         frame_transform : Optional[Callable]
         video_transform : Optional[Callable]
@@ -61,7 +61,7 @@ class DatasetProcessor(IterableDataset):
 
         self.batch_size = batch_size
         self.cachefile_name = cachefile_name
-        self.dataset = datasets
+        self.dataset: list[Sample] = datasets
         self.temporal_res = temporal_res
         self.temporal_size = temporal_size
         dataset_frametime = 1 / dataset_max_framerate
@@ -168,11 +168,11 @@ class DatasetProcessor(IterableDataset):
     def video_pipe_pytorch(self, video: torch.Tensor,
                            label: torch.Tensor):
         sample = self.dataset[label]
-        crop = sample[3]
-        rotate_180 = sample[4]
+        crop = sample.bounding_box
+        rotate_180 = sample.rotate_180
 
         # Some videos in PianoYT are the wrong resolution smh my head
-        if "PianoYT" in Path(sample[0]).parts:
+        if sample.dataset == "pianoyt":
             if video.shape[-1] == 1920 and abs(crop[-1] - 1280) < abs(crop[-1] - 1920):
                 video = v2.functional.resize(video, [720, 1280])
             elif video.shape[-1] == 1280 and abs(crop[-1] - 1280) > abs(crop[-1] - 1920):
@@ -211,10 +211,10 @@ class DatasetProcessor(IterableDataset):
             n_frames = int(subprocess.run(
                 f"ffprobe -v error -select_streams v:0 -count_packets "
                 f"-show_entries stream=nb_read_packets -of csv=p=0 "
-                f"{sample[2]}".split(" "), capture_output=True).stdout.decode())
+                f"{sample.video_path}".split(" "), capture_output=True).stdout.decode())
 
             file_list.append(
-                f"{self.dataset[sample_idx][2]} "
+                f"{self.dataset[sample_idx].video_path} "
                 f"{sample_idx} "
                 f"0 "
                 f"{n_frames}"

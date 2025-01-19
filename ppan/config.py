@@ -64,8 +64,9 @@ PRETRAINED_MODEL_BASE = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main
 PRETRAINED_MODEL_SMALL = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/distill/vit_s_k710_dl_from_giant.pth"
 
 # Default pretraining settings
-no_epochs = 15
+no_epochs = 10
 finetune_default = {
+    "optimizer": "sgd",
     "no_epochs": no_epochs,
     "batch_size": 96,
     "lr_sgd": 0.25,
@@ -77,24 +78,26 @@ finetune_default = {
     "scheduler_type": "cosine",
     "eval_every": 250,
     "save_every": 250,
-    "randaug": True,
-    "temporal_jitter": False,
+    "frames_only": False,
+    "onsets_only": False,
     "spatial_jitter": True,
     "rand_erase": False,
+    "rand_rotate": True,
     "rotate_180": False,
-    "gaussian_noise": False,
-    "color_jitter": False,
+    "gaussian_noise": True,
+    "grayscale": True,
+    "color_jitter": True,
     "dropout": 0.,
     "drop_path": 0.,
     "momentum": 0.9,
     "grad_clip": 1.,
-    "mask_percentage": None,
-    "do_smoothing": False,
-    "confidence": 0.9,
+    "do_smoothing_frame": False,
+    "do_smoothing_onset": False,
+    "confidence_frame": 0.9,
+    "confidence_onset": 0.9,
     "do_mixup": False,
     "mixup_alpha": 0.2,
     "stride": 1,
     "window_size": 6,
-    "lenience": 1,
-    "loss_fn": "bce"
+    "lenience": 1
 }

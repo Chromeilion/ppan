@@ -57,6 +57,7 @@ export LAUNCHER="accelerate launch \
     --num_processes $NUM_PROCESSES \
     --num_machines $NNODES \
     --multi_gpu \
+    --dynamo_mode max-autotune \
     "
 
 export PROGRAM="$PPAN_REPO_ROOT/ppan $1"

@@ -6,8 +6,9 @@ import glob
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 from collections import OrderedDict
+from dataclasses import dataclass
 
 import torchvision.transforms.v2 as v2
 from tqdm import tqdm
@@ -19,16 +20,30 @@ from rach3datautils.utils.dataset import DatasetUtils
 from timm import create_model
 
 import ppan.model_mae
-from ppan.config import PathLike, SAMPLE_TYPE, TEST_TRAIN_SPLIT
+from ppan.config import PathLike, TEST_TRAIN_SPLIT
 
 
-def load_rach3(root: PathLike):
+ds_prefixes = Literal["r3x", "r3s", "pianoyt", "miditest"]
+
+@dataclass
+class Sample:
+    midi_path: PathLike
+    video_path: PathLike
+    dataset: ds_prefixes
+    bounding_box: Optional[tuple[int, int, int, int]] = None
+    flac_path: Optional[PathLike] = None
+    rotation_factor: float = 0
+    rotate_180: bool = False
+
+
+def load_rach3(root: PathLike, ds_prefix: ds_prefixes = "r3s"):
     """
     Load the dataset for use with PPAn.
 
     Parameters
     ----------
     root : PathLike
+    ds_prefix : ds_prefixes
 
     Returns
     -------
@@ -37,31 +52,37 @@ def load_rach3(root: PathLike):
     """
     root = Path(root)
     test, train = root / "test", root / "train"
-    bbs_path = root / "rach3_bounding_boxes.json"
+    bbs_path = root / f"{ds_prefix}_bounding_boxes.json"
 
     with open(bbs_path, "r") as f:
-        bbs = json.load(f)
-    bbs = {i["session_id"]: i["box"] for i in bbs}
+        meta = json.load(f)
+    bbs = {"_".join(key.split("_")[:-1]): value for key, value in meta.items()}
+    rot = {"_".join(key.split("_")[:-1]): value["rot_angle"] for key, value in meta.items()}
 
-    return (load_rach3_split(test, bbs, False),
-            load_rach3_split(train, bbs, True))
+    return (load_rach3_split(test, bbs, rot, False, ds_prefix),
+            load_rach3_split(train, bbs, rot, True, ds_prefix))
 
 
 def load_rach3_split(root: PathLike,
                      bbs: dict,
-                     augment: bool) -> SAMPLE_TYPE:
+                     rot: dict,
+                     augment: bool,
+                     ds_prefix: ds_prefixes) -> list[Sample]:
     """
-    Load a folder containing Rach3 files (such as test or train folders)
+    Load a folder containing Rach3 fi        crops = [bb for _ in range(len(i.midi.splits_list))]
+        rots = [r for _ in range(len(i.midi.splits_list))]les (such as test or train folders)
 
     Parameters
     ----------
     root : PathLike
     bbs : dict
+    rot : dict
     augment : bool
+    ds_prefix : ds_prefixes
 
     Returns
     -------
-    samples : SAMPLE_TYPE
+    samples : list[Sample]
     """
     dataset = DatasetUtils(root)
     sessions = dataset.remove_noncomplete(
@@ -69,22 +90,29 @@ def load_rach3_split(root: PathLike,
         required=["midi.splits_list", "flac.splits_list",
                   "video.splits_list"]
     )
-    samples: SAMPLE_TYPE = []
+    samples: list[Sample] = []
     for i in sessions:
-        bb_meta = bbs[str(i.id)][0]["box"]
-        bb = (round(bb_meta["y1"]), round(bb_meta["y2"]),
-              round(bb_meta["x1"]), round(bb_meta["x2"]))
-        crops = [bb for _ in range(len(i.midi.splits_list))]
-        [samples.append(j) for j in zip(i.midi.splits_list,
-                                        i.flac.splits_list,
-                                        i.video.splits_list,
-                                        crops,
-                                        [False for _ in range(len(crops))],
-                                        [augment for _ in range(len(crops))])]
+        bb_meta = bbs[str(i.id)]
+        bb = (int(bb_meta["y1"]), int(bb_meta["y2"]),
+              int(bb_meta["x1"]), int(bb_meta["x2"]))
+        r = float(rot[str(i.id)])
+        for mid, flac, video in zip(i.midi.splits_list,
+                                    i.flac.splits_list,
+                                    i.video.splits_list):
+            sample = Sample(
+                midi_path=mid,
+                flac_path=flac,
+                video_path=video,
+                bounding_box=bb,
+                dataset=ds_prefix,
+                rotation_factor=r,
+                rotate_180=False
+            )
+            samples.append(sample)
     return samples
 
 
-def load_pianoyt(root: PathLike) -> TEST_TRAIN_SPLIT:
+def load_pianoyt(root: PathLike) -> tuple[list[Sample], list[Sample]]:
     data = []
     with open(os.path.join(root, "dataset.csv"), "r") as f:
         reader = csv.reader(f)
@@ -96,34 +124,43 @@ def load_pianoyt(root: PathLike) -> TEST_TRAIN_SPLIT:
         video = os.path.join(root, f'processed_videos/{Path(i[0]).name}')
         video = video.replace(" ", "_")
         crop = [int(j) for j in i[4:]]
-        crop = [crop[0], crop[1], crop[2], crop[3]]
+        crop = (crop[0], crop[1], crop[2], crop[3])
         tup = [os.path.join(root, f'pianoyt_MIDI/audio_{i[1]}.0.midi'),
                None, video, crop, True, True]
+        sample = Sample(
+            midi_path=os.path.join(root, f'pianoyt_MIDI/audio_{i[1]}.0.midi'),
+            video_path=video,
+            bounding_box=crop,
+            rotate_180=True,
+            dataset="pianoyt"
+        )
         if i[3] == "1":
-            samples_train.append(tup)
+            samples_train.append(sample)
         elif i[3] == "3":
             tup[-1] = False
-            samples_test.append(tup)
+            samples_test.append(sample)
 
     return samples_test, samples_train
 
 
-def load_miditest(root) -> list[SAMPLE_TYPE]:
+def load_miditest(root) -> list[Sample]:
     midi_root = os.path.join(root, "miditest_MIDI")
     midi_files = os.listdir(midi_root)
     midi_files = [os.path.join(midi_root, i) for i in midi_files]
     videos_root = os.path.join(root, "miditest_processed_videos")
     videos = os.listdir(videos_root)
     videos = [os.path.join(videos_root, i) for i in videos]
-    none = [None for _ in midi_files]
-    true = [True for _ in midi_files]
-    false = [False for _ in midi_files]
-    # Zoom in slightly
-    crop = [[0, 336, 30, 1877] for _ in midi_files]
-    return list(zip(midi_files, none, videos, crop, true, false))
+    samples = [Sample(
+        midi_path=mid,
+        video_path=vid,
+        rotate_180=True,
+        dataset="miditest"
+    ) for vid, mid in zip(videos, midi_files)]
+    return samples
 
 
-def load_all_data(rach3_dir: Optional[PathLike] = None,
+def load_all_data(rach3_s_dir: Optional[PathLike] = None,
+                  rach3_x_dir: Optional[PathLike] = None,
                   pianoyt_dir: Optional[PathLike] = None,
                   miditest_dir: Optional[PathLike] = None):
     """Load Rach3, pianoYT, and Miditest and put them into train, test and
@@ -133,11 +170,16 @@ def load_all_data(rach3_dir: Optional[PathLike] = None,
     train = []
     miditest = None
     pianoyt_test = None
-    rach3_test = None
-    if rach3_dir is not None:
-        rach3_test, rach3_train = load_rach3(rach3_dir)
-        test.extend(rach3_test)
-        train.extend(rach3_train)
+    rach3_s_test = None
+    rach3_x_test = None
+    if rach3_s_dir is not None:
+        rach3_s_test, rach3_s_train = load_rach3(rach3_s_dir, "r3s")
+        test.extend(rach3_s_test)
+        train.extend(rach3_s_train)
+    if rach3_x_dir is not None:
+        rach3_x_test, rach3_x_train = load_rach3(rach3_x_dir, "r3x")
+        test.extend(rach3_x_test)
+        train.extend(rach3_x_train)
     if pianoyt_dir is not None:
         pianoyt_test, pianoyt_train = load_pianoyt(pianoyt_dir)
         test.extend(pianoyt_test)
@@ -145,7 +187,7 @@ def load_all_data(rach3_dir: Optional[PathLike] = None,
     if miditest_dir is not None:
         miditest = load_miditest(miditest_dir)
 
-    return test, train, miditest, pianoyt_test, rach3_test
+    return test, train, miditest, pianoyt_test, rach3_s_test, rach3_x_test
 
 
 def load_omaps(root: PathLike) -> TEST_TRAIN_SPLIT:
@@ -162,7 +204,7 @@ def load_omaps(root: PathLike) -> TEST_TRAIN_SPLIT:
     return _load_omaps_split(test_dir), _load_omaps_split(train_dir)
 
 
-def _load_omaps_split(root: PathLike) -> list[SAMPLE_TYPE]:
+def _load_omaps_split(root: PathLike) -> list[Sample]:
     """Load a train or test split for the OMAPS dataset.
     """
     videos = [os.path.join(root, i) for i in

@@ -15,6 +15,7 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torchvision
+import torchvision.transforms.v2 as v2
 from torch.utils.data import Dataset
 
 device = "cpu"
@@ -35,13 +36,25 @@ class BaseVideoProcessor(nn.Module, ABC):
     processing behaviour of the PPANDataset class. Simply override the
     process_video method.
     """
-
     @abstractmethod
+    @torch.compile(dynamic=True)
     def process_video(self, img: torch.tensor) -> torch.tensor:
         ...
 
     def forward(self, x) -> torch.tensor:
         return self.process_video(x)
+
+
+class DefaultVideoProcessor(BaseVideoProcessor):
+    """Default video processor doing basically nothing except a resize.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.augmentations = v2.Resize((224, 224))
+
+    def process_video(self, vid):
+        return self.augmentations(vid)
+
 
 @dataclass
 class DatasetConfig:
@@ -117,9 +130,12 @@ class PPANDataset(Dataset):
         out = {}
         if self.vid_key is not None:
             out[self.vid_key] = self._get_vid(idx)
+        if self.onsets_key is None and self.frames_key is None:
+            return out
+        labs = self._get_lab(idx)
         if self.onsets_key is not None:
-            labs = self._get_lab(idx)
             out[self.onsets_key] = torch.tensor(labs["onsets"], device=device).to(device, non_blocking=True).float()
+        if self.frames_key is not None:
             out[self.frames_key] = torch.tensor(labs["frames"], device=device).to(device, non_blocking=True).float()
         return out
 

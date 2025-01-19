@@ -24,7 +24,8 @@ from ppan.utils import load_all_data
 PathLike = Union[str, bytes, os.PathLike]
 
 
-def process(rach3_dir: PathLike,
+def process(rach3_s_dir: PathLike,
+            rach3_x_dir: PathLike,
             pianoyt_dir: PathLike,
             miditest_dir: PathLike,
             output_dir: PathLike,
@@ -40,14 +41,9 @@ def process(rach3_dir: PathLike,
     test_dir.mkdir(exist_ok=True)
     train_dir.mkdir(exist_ok=True)
 
-    test_samples, train_samples, _, _, _ = load_all_data(
-        rach3_dir, pianoyt_dir, miditest_dir
-    )
-    # Remove the automatic crop resize
-    for i in range(len(train_samples)):
-        sample = list(train_samples[i])
-        sample[5] = False
-        train_samples[i] = tuple(sample)
+    test_samples, train_samples = load_all_data(
+        rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir
+    )[:2]
 
     shuffle(test_samples)
     shuffle(train_samples)
@@ -77,7 +73,7 @@ def save_dataset(ds, out_dir):
         for file_idx, i in enumerate(tqdm.tqdm(ds, desc="Processing dataset")):
             i["sample"] = i["sample"][0]
             # Each individual video gets put into its own directory
-            group_name = Path(i['sample'][2]).stem
+            group_name = Path(i['sample'].video_path).stem
             if group_name not in f:
                 f.create_group(group_name)
             group = f[group_name]
@@ -87,7 +83,7 @@ def save_dataset(ds, out_dir):
 
             mid_path = out_dir/f"{group_name}.midi"
             if not Path(mid_path).exists():
-                shutil.copyfile(i["sample"][0], mid_path)
+                shutil.copyfile(i["sample"].midi_path, mid_path)
 
            # Ensure we have an even value for height and width
             if vid.shape[-1] % 2 != 0 or vid.shape[-2] % 2 != 0:
@@ -100,7 +96,7 @@ def save_dataset(ds, out_dir):
                 n_frames = int(subprocess.run(
                     f"ffprobe -v error -select_streams v:0 -count_packets "
                     f"-show_entries stream=nb_read_packets -of csv=p=0 "
-                    f"{i['sample'][2]}".split(" "), capture_output=True).stdout.decode())
+                    f"{i['sample'].video_path}".split(" "), capture_output=True).stdout.decode())
                 dtype = h5py.special_dtype(vlen=np.dtype('uint8'))
                 group.create_dataset(frame_dataset, (n_frames,), dtype=dtype)
 
@@ -113,7 +109,7 @@ def save_dataset(ds, out_dir):
 
             details_path = out_dir/f"{group_name}_video_details.txt"
             if not details_path.exists():
-                vid_duration = MultimediaTools().get_decoded_duration(i["sample"][2])
+                vid_duration = MultimediaTools().get_len(i["sample"].video_path)
                 with open(details_path, "w") as f_d:
                     f_d.write(f"duration: {vid_duration}")
 
