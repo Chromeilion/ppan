@@ -17,7 +17,8 @@ from transformers.integrations import WandbCallback
 from timm.data.constants import IMAGENET_DEFAULT_STD, IMAGENET_DEFAULT_MEAN
 from ppan.config import seed, num_labels, finetune_default
 from ppan.dataset import PPANDataset, get_samples, DatasetConfig, OutputMap
-from ppan.model import PPANModel, PPANConfig, PPANVideoProcessor, PPANCollate
+from ppan.model import (PPANModel, PPANConfig, PPANVideoProcessor, PPANCollate,
+                        FRAME_WEIGHTS, ONSET_WEIGHTS)
 
 
 PathLike = Union[str, bytes, os.PathLike]
@@ -51,13 +52,20 @@ def train(dataset_dir: PathLike,
           rand_rotate: Optional[bool] = None,
           frames_only: Optional[bool] = None,
           onsets_only: Optional[bool] = None,
+          class_weights: Optional[tuple[list[float], list[float]]] = None,
           *_, **__):
+    # The handling of default values is not done well right now, however it
+    # works and we can change it later
     if dataset_dir is None:
         raise AttributeError("The dataset directory is required for "
                              "model training.")
     if output_dir is None:
         raise AttributeError("The output directory is required for "
                              "model training.")
+    if class_weights is None:
+        class_weights = finetune_default["class_weights"]
+    if class_weights[0] == "fancy":
+        class_weights = [ONSET_WEIGHTS, FRAME_WEIGHTS]
     if frames_only is None:
         frames_only = finetune_default["frames_only"]
     if onsets_only is None:
@@ -151,6 +159,8 @@ def train(dataset_dir: PathLike,
         confidence_onset=label_smoothing_conf_onset,
         dropout=dropout,
         drop_path=drop_path,
+        bce_loss_weight_onset=class_weights[0],
+        bce_loss_weight_frame=class_weights[1]
     )
     train_ds_config = DatasetConfig(
         video_processor=processor,
@@ -202,7 +212,7 @@ def train(dataset_dir: PathLike,
             weight_decay=weight_decay
         )
     training_arguments = TrainingArguments(
-        ddp_find_unused_parameters=False,
+        ddp_find_unused_parameters=True,
         num_train_epochs=no_epochs,
         output_dir=str(output_dir),
         eval_strategy="steps",
@@ -219,7 +229,7 @@ def train(dataset_dir: PathLike,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         report_to=["wandb"],
-        dataloader_num_workers=int(os.environ.get("PPAN_DATASET_NO_WORKERS", os.cpu_count()//2)),
+        dataloader_num_workers=int(os.environ.get("PPAN_DATASET_NO_WORKERS", 12)),
         dataloader_prefetch_factor=1,
         log_on_each_node=False,
         save_total_limit=4,
@@ -293,17 +303,23 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
             v2.ToDtype(torch.uint8, scale=True)
         ])
         self.train_imgs = unnormalize(sample_train_dataset["pixel_values"])
-        self.onsets = self.sample_dataset["onsets"][:, :, None].to("cpu")
-        self.frames = self.sample_dataset["frames"][:, :, None].to("cpu")
+        self.onsets, self.frames = None, None
+        if "onsets" in self.sample_dataset:
+            self.onsets = self.sample_dataset["onsets"][:, :, None].to("cpu")
+        if "frames" in self.sample_dataset:
+            self.frames = self.sample_dataset["frames"][:, :, None].to("cpu")
         self.videos_run = False
         self.freq = freq
 
     def add_preds_image(self, logits: torch.Tensor, target: torch.Tensor,
                         lab: str, step: int):
-        img_t = v2.functional.resize(target[None, :],
+        if len(target.shape) == 1:
+            target = target[:, None]
+
+        img_t = v2.functional.resize(target[None, ...],
                                      [num_labels, num_labels // 2],
                                      interpolation=v2.InterpolationMode.NEAREST)
-        img_p = v2.functional.resize(logits[None, :],
+        img_p = v2.functional.resize(logits[None, ...],
                                      [num_labels, num_labels // 2],
                                      interpolation=v2.InterpolationMode.NEAREST)
         img_f = torch.cat((img_t, img_p), dim=2)
@@ -335,9 +351,10 @@ class WandbFinetunePredictionProgressCallback(WandbCallback):
                     preds = model(**sample)
                 logits = preds["logits"].cpu().permute(0, 2, 1)
                 for i in range(logits.shape[0]):
+                    to_cat = [j[i] for j in [self.onsets, self.frames] if j is not None]
                     self.add_preds_image(
                         torch.squeeze(logits[i]),
-                        target=torch.squeeze(torch.cat([self.onsets[i], self.frames[i]], dim=1)),
+                        target=torch.squeeze(torch.cat(to_cat, dim=1)),
                         lab=f"True vs Pred (Onsets Then Frames) {i}",
                         step=state.global_step
                     )

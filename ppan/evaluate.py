@@ -34,14 +34,15 @@ filecounter = 0
 
 def evaluate(preds_output: PathLike,
              model_checkpoint: PathLike,
-             rach3_dir: Optional[PathLike] = None,
+             rach3_s_dir: Optional[PathLike] = None,
+             rach3_x_dir: Optional[PathLike] = None,
              pianoyt_dir: Optional[PathLike] = None,
              miditest_dir: Optional[PathLike] = None,
              midi_output: Optional[PathLike] = None,
              threshold: Optional[float] = None,
              batch_size: Optional[int] = None,
              *_, **__):
-    if not [i for i in [rach3_dir, pianoyt_dir, miditest_dir] if i is not None]:
+    if not [i for i in [rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir] if i is not None]:
         raise AttributeError("A dataset directory is required to run "
                              "evaluation.")
     if preds_output is None:
@@ -61,14 +62,14 @@ def evaluate(preds_output: PathLike,
     gaussian_sigma_frames = 0.5
 
     # TODO: Get up to date with the rest of the codebase
-    _, _, miditest, pianoyt_test, rach3_test = load_all_data(
-        rach3_dir, pianoyt_dir, miditest_dir
+    _, _, miditest, pianoyt_test, rach3_s_test, rach3_x_test = load_all_data(
+        rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir
     )
 #    omaps_test, _ = load_omaps(os.environ["PPAN_OMAPS_DIR"])
 #    datasets = [omaps_test, rach3_test, miditest, pianoyt_test]
 #    dataset_names = ["omaps", "rach3", "miditest", "pianoyt"]
-    datasets = [rach3_test, miditest, pianoyt_test]
-    dataset_names = ["rach3", "miditest", "pianoyt"]
+    datasets = [rach3_s_test, rach3_x_test, miditest, pianoyt_test]
+    dataset_names = ["r3s", "r3x", "miditest", "pianoyt"]
 
     [evaluate_on_dataset(
         i,
@@ -96,7 +97,8 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
             batch_size=1,
             temporal_size=model.config.num_frames/30,
             epoch_size=1,
-            step=1
+            step=1,
+            cachefile_name=f"{dataset_name}_cache.txt"
         )
         with no_grad():
             preds_rach3 = eval_loop(dataset=dataset,
@@ -113,8 +115,8 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
         fixed_preds = {}
         for key, val in preds_rach3.items():
             p_name = Path(key).name
-            all_vid_names = [Path(i[2]).name for i in samples]
-            fixed_preds[samples[all_vid_names.index(p_name)][2]] = preds_rach3[key]
+            all_vid_names = [Path(i.video_path).name for i in samples]
+            fixed_preds[samples[all_vid_names.index(p_name)].video_path] = preds_rach3[key]
 
         preds_rach3 = fixed_preds
 
@@ -132,13 +134,13 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
             final_pred_onset, final_pred_frame, threshold, gaussian_sigma, gaussian_sigma_frames
         )
         pianoroll = pianoroll.astype(int) * 100
-        session_files = [i for i in samples if os.path.basename(vid_path) in os.path.basename(str(i[2]))][0]
-        vid_len = MultimediaTools().get_decoded_duration(session_files[2])
+        session_files = [i for i in samples if os.path.basename(vid_path) in os.path.basename(str(i.video_path))][0]
+        vid_len = MultimediaTools().get_decoded_duration(session_files.video_path)
         try:
-            labels = session_files[6]
-        except IndexError:
+            labels = session_files.labels
+        except AttributeError:
             labels = PPAnMidi(vid_len, temporal_res, 0)
-            labels.set_midi(session_files[0])
+            labels.set_midi(session_files.midi_path)
 
         vid_framerate = vid_len/pianoroll.shape[1]
         loc_mir_stats = calc_stats(
@@ -199,11 +201,6 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold, si
             p_y = y
         pp_x = x
 
-#    # Sanity check to make sure we haven't messed anything obvious up
-#    nonzero_onsets = pianoroll.nonzero()
-#    nonzero_onsets = list(zip(nonzero_onsets[0], nonzero_onsets[1]))
-#    assert all([i in nonzero_preds for i in nonzero_onsets])
-
     return pianoroll.T
 
 
@@ -218,7 +215,7 @@ def eval_loop(dataset, model):
         for timestamps, sample, pred in zip(i['times'].to(device),
                                               i['sample'],
                                               preds):
-            preds_dict[str(sample[2])].append((pred.cpu().numpy(),
+            preds_dict[str(sample.video_path)].append((pred.cpu().numpy(),
                                          timestamps.cpu().numpy()))
 
     return preds_dict

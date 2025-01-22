@@ -37,7 +37,7 @@ class BaseVideoProcessor(nn.Module, ABC):
     process_video method.
     """
     @abstractmethod
-    @torch.compile(dynamic=True)
+    @torch.compile(mode="reduce-overhead")
     def process_video(self, img: torch.tensor) -> torch.tensor:
         ...
 

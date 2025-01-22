@@ -1,5 +1,6 @@
 import argparse as ap
 import os
+import json
 
 from dotenv import load_dotenv
 
@@ -98,6 +99,14 @@ def main():
         required=False
     )
     parser_train.add_argument(
+        "-w", "--class-weights",
+        action="store",
+        default=os.environ.get("PPAN_TRAIN_CLASS_WEIGHTS", None),
+        type=json.loads,
+        help="Custom class weights to be applied to the loss",
+        required=False
+    )
+    parser_train.add_argument(
         "--weight-decay",
         action="store",
         default=os.environ.get("PPAN_TRAIN_WEIGHT_DECAY", None),
@@ -143,62 +152,71 @@ def main():
         "-sj", "--spatial-jitter",
         action="store",
         help="Whether to use the spatial jitter augmentation",
-        default=os.environ.get("PPAN_TRAIN_SPATIAL_JITTER", None),
-        required=False,
+        default=get_boolian_env("PPAN_TRAIN_SPATIAL_JITTER"),
+        type=str_to_bool,
     )
     parser_train.add_argument(
         "-cg", "--color-jitter",
         action="store",
         help="Whether to use the color jitter augmentation",
-        default=os.environ.get("PPAN_TRAIN_COLOR_JITTER", None),
+        default=get_boolian_env("PPAN_TRAIN_COLOR_JITTER"),
+        type=str_to_bool,
     )
     parser_train.add_argument(
         "-oo", "--onsets-only",
         action="store",
         help="Whether to train only on onset predictions",
-        default=os.environ.get("PPAN_TRAIN_ONSETS_ONLY", None),
+        default=get_boolian_env("PPAN_TRAIN_ONSETS_ONLY"),
+        type=str_to_bool
     )
     parser_train.add_argument(
         "-fo", "--frames-only",
         action="store",
         help="Whether to train only on frame predictions",
-        default=os.environ.get("PPAN_TRAIN_FRAMES_ONLY", None),
+        default=get_boolian_env("PPAN_TRAIN_FRAMES_ONLY"),
+        type=str_to_bool
     )
     parser_train.add_argument(
         "-rr", "--rand-rotate",
         action="store",
         help="Whether to use random rotation augmentation",
-        default=os.environ.get("PPAN_TRAIN_RAND_ROTATE", None),
+        default=get_boolian_env("PPAN_TRAIN_RAND_ROTATE"),
+        type=str_to_bool,
     )
     parser_train.add_argument(
         "-dr", "--dropout",
         action="store",
         help="Amount of dropout to use",
         default=os.environ.get("PPAN_TRAIN_DROPOUT", None),
+        type=float
     )
     parser_train.add_argument(
         "-dp", "--drop-path",
         action="store",
         help="Stochastic dropout parameter",
         default=os.environ.get("PPAN_TRAIN_DROP_PATH", None),
+        type=float
     )
     parser_train.add_argument(
         "-g", "--grayscale",
         action="store",
         help="Whether to train on grayscale videos",
-        default=os.environ.get("PPAN_TRAIN_GRAYSCALE", None),
+        default=get_boolian_env("PPAN_TRAIN_GRAYSCALE"),
+        type=str_to_bool
     )
     parser_train.add_argument(
         "-re", "--rand-erase",
         action="store",
         help="Whether to use random erasing augmentation",
-        default=os.environ.get("PPAN_TRAIN_RAND_ERASE", None),
+        default=get_boolian_env("PPAN_TRAIN_RAND_ERASE"),
+        type=str_to_bool
     )
     parser_train.add_argument(
         "-gn", "--gaussian-noise",
         action="store",
         help="Whether to use gaussian noise augmentation",
-        default=os.environ.get("PPAN_TRAIN_GAUSSIAN_NOISE", None),
+        default=get_boolian_env("PPAN_TRAIN_GAUSSIAN_NOISE"),
+        type=str_to_bool,
     )
     parser_train.add_argument(
         "-lsf", "--label-smoothing-conf-frame",
@@ -285,6 +303,14 @@ def main():
     args = parser.parse_args()
     args.func(**vars(args))
 
+
+def get_boolian_env(key):
+    return str_to_bool(os.environ.get(key, "False"))
+
+def str_to_bool(input_str):
+    if input_str is None:
+        return None
+    return input_str.lower() in ("yes", "true", "t", "1")
 
 # To speed up the CLI we only import the rest of the package once all
 # args have been processed.

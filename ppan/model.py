@@ -49,8 +49,8 @@ FRAME_WEIGHTS = torch.tensor([
 
 # Because some weights are extremely high, training becomes unstable.
 # Therefore, I rescale everything here to be more reasonable.
-FRAME_WEIGHTS = ((FRAME_WEIGHTS / FRAME_WEIGHTS.min()).clamp(1, 5) + 1).tolist()
-ONSET_WEIGHTS = ((ONSET_WEIGHTS / ONSET_WEIGHTS.min()).clamp(1, 5) + 1).tolist()
+FRAME_WEIGHTS = ((FRAME_WEIGHTS / FRAME_WEIGHTS.min()).clamp(1, 3) + 1).tolist()
+ONSET_WEIGHTS = ((ONSET_WEIGHTS / ONSET_WEIGHTS.min()).clamp(1, 3) + 2).tolist()
 
 class PPANConfig(PretrainedConfig):
     model_type = "ppan"
@@ -193,12 +193,13 @@ class PPANVideoProcessor(BaseVideoProcessor):
         if rand_rotate is None:
             rand_rotate = False
 
-        augs = []
-        augs.append(v2.Resize(model_crop_resolution))
+        augs: list = list()
+        augs.append(v2.Resize(None, max_size=model_crop_resolution[1]))
+        augs.append(v2.RandomCrop(model_crop_resolution, pad_if_needed=True))
         if spatial_jitter:
             augs.append(v2.ScaleJitter(
                 target_size=(model_crop_resolution[1], model_crop_resolution[0]),
-                scale_range=(0.96, 1.005)
+                scale_range=(0.96, 1.001)
             ))
             augs.append(v2.RandomCrop(size=model_crop_resolution,
                                       pad_if_needed=True))
@@ -206,7 +207,7 @@ class PPANVideoProcessor(BaseVideoProcessor):
             augs.append(v2.RandomApply([v2.ColorJitter(brightness=0.1)],
                                        p=0.4))
         if rand_rotate:
-            augs.append(v2.RandomApply([v2.RandomRotation(2)], p=0.4))
+            augs.append(v2.RandomApply([v2.RandomRotation(0.5)], p=0.4))
         if grayscale:
             augs.append(v2.Grayscale(num_output_channels=3))
         if rand_erase:
@@ -232,13 +233,12 @@ class PPANCollate:
 
     def __call__(self, *args, **kwargs):
         batch = self.default_collate(*args, **kwargs)
-
-        if self.config.do_smoothing_frame:
+        if "frame" in batch and self.config.do_smoothing_frame:
             frame_p = batch["frames"] > 0.5
             batch["frames"][frame_p] = self.config.confidence_frame
             batch["frames"][~frame_p] = 1 - self.config.confidence_frame
 
-        if self.config.do_smoothing_onset:
+        if "onsets" in batch and self.config.do_smoothing_onset:
             onset_p = batch["onsets"] > 0.5
             batch["onsets"][onset_p] = self.config.confidence_onset
             batch["onsets"][~onset_p] = 1 - self.config.confidence_onset
