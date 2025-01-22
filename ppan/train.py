@@ -211,6 +211,7 @@ def train(dataset_dir: PathLike,
             momentum=momentum,
             weight_decay=weight_decay
         )
+
     training_arguments = TrainingArguments(
         ddp_find_unused_parameters=True,
         num_train_epochs=no_epochs,
@@ -234,7 +235,7 @@ def train(dataset_dir: PathLike,
         log_on_each_node=False,
         save_total_limit=4,
         max_grad_norm=finetune_default["grad_clip"],
-        label_names=list(output_map.values())
+        label_names=[i for i in output_map.values() if i is not None]
     )
 
     trainer = Trainer(
