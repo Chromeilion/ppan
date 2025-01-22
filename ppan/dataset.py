@@ -1,673 +1,246 @@
-import csv
-import json
+from __future__ import annotations
 import os
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Tuple, Optional, Callable, Union
-import glob
+from typing import Optional, TypedDict, Any
+import random
+from dataclasses import dataclass
 
-from ultralytics import YOLO
-from tqdm import tqdm
-import nvidia.dali.fn as fn
-import nvidia.dali.plugin.pytorch.fn as pfn
-import torch
-import torchvision.transforms.functional as functional
-import torchvision.tv_tensors
-from nvidia.dali import pipeline_def
-from nvidia.dali.plugin.pytorch import DALIGenericIterator
-from rach3datautils.utils.dataset import DatasetUtils
-from rach3datautils.utils.multimedia import MultimediaTools
-from torch.utils.data import IterableDataset
-
-from torchvision import tv_tensors
-from torchvision.transforms import v2
-from transformers import VideoMAEImageProcessor
-from ppan.config import seed
 from ppan.midi import PPAnMidi
+from ppan.config import frame_hd5_file
 
-PathLike = Union[str, bytes, os.PathLike]
+import  h5py
+import numpy as np
+import numpy.typing as npt
+import torch
+import torch.nn as nn
+import torchvision
+import torchvision.transforms.v2 as v2
+from torch.utils.data import Dataset
 
-# [[midi_path, flac_path, video_path, bounding_box, whether to rotate 180,
-#   random_resize]]
-SAMPLE_TYPE = List[
-    Tuple[PathLike, Optional[PathLike], PathLike,
-          Optional[tuple[int, int, int, int]], bool, bool, PathLike]
-]
-TEST_TRAIN_SPLIT = tuple[list[SAMPLE_TYPE], list[SAMPLE_TYPE]]
+device = "cpu"
 
-# Tensor GN pipeline, taken from:
-# https://github.com/pytorch/vision/issues/6192#issuecomment-1164176231
-def gauss_noise_tensor(img):
-    assert isinstance(img, torch.Tensor)
-    dtype = img.dtype
-    if not img.is_floating_point():
-        img = img.to(torch.float32)
-
-    sigma = 5.0
-
-    out = img + sigma * torch.randn_like(img)
-
-    if out.dtype != dtype:
-        out = out.to(dtype)
-
-    return out
-
-
-class BaseDataset(IterableDataset):
+class OutputMap(TypedDict):
+    """Template for a dictionary that controls the names and presence of the
+    outputs in a PPANDataset. If one of these is set to None, then it never
+    gets loaded.
     """
-    Base class for PPAn datasets.
+    vid: Optional[str]
+    frames: Optional[str]
+    onsets: Optional[str]
+
+
+class BaseVideoProcessor(nn.Module, ABC):
     """
-    def __init__(
-            self,
-            datasets: SAMPLE_TYPE,
-            batch_size: int,
-            epoch_size: Optional[int] = None,
-            frame_transform: Optional[Callable[[torch.tensor],
-                                               torch.tensor]] = None,
-            video_transform: Optional[VideoMAEImageProcessor] = None,
-            temporal_res: Optional[float] = None,
-            temporal_size: Optional[float] = None,
-            dataset_max_framerate: Optional[int] = None,
-            step: Optional[int] = None,
-            cachefile_name: Optional[str] = None,
-            max_iters_per_epoch: Optional[int] = None,
-            target_epoch: Optional[int] = None
-    ):
+    Base video processor abstract class. Can be used to customize the video
+    processing behaviour of the PPANDataset class. Simply override the
+    process_video method.
+    """
+    @abstractmethod
+    @torch.compile(mode="reduce-overhead")
+    def process_video(self, img: torch.tensor) -> torch.tensor:
+        ...
+
+    def forward(self, x) -> torch.tensor:
+        return self.process_video(x)
+
+
+class DefaultVideoProcessor(BaseVideoProcessor):
+    """Default video processor doing basically nothing except a resize.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.augmentations = v2.Resize((224, 224))
+
+    def process_video(self, vid):
+        return self.augmentations(vid)
+
+
+@dataclass
+class DatasetConfig:
+    video_processor: BaseVideoProcessor
+    output_map: OutputMap
+    stride: int # Step size between consecutive frames in a window
+    window_size: int
+    lenience: int
+    shared_dict: Optional[dict[str, Any]] = None
+    max_samples: Optional[int] = None
+
+
+class PPANDataset(Dataset):
+    """
+    PPAN Dataset responsible for loading videos and processing them.
+    The provided dataset should have already been pre-processed with
+    PPANPreProcessor.
+    """
+    def __init__(self, root: Path, config: DatasetConfig) -> None:
+        self.root = root
+        self._hd5_frame = None
+        self.config = config
+        self.samples = self._load_samples()
+        if self.config.max_samples is not None:
+            self.samples = random.choices(self.samples, k=self.config.max_samples)
+        self.vid_key: Optional[str] = "vid"
+        self.onsets_key: Optional[str] = "onsets"
+        self.frames_key: Optional[str] = "frames"
+
+        if config.output_map is not None:
+            self.vid_key = config.output_map["vid"]
+            self.onsets_key = config.output_map["onsets"]
+            self.frames_key = config.output_map["frames"]
+
+        self.video_processor: BaseVideoProcessor = config.video_processor
+        self.cache: Optional[dict[str, Any]] = config.shared_dict
+
+    @property
+    def hd5_frame(self):
+        if self._hd5_frame is None:
+            self._hd5_frame = h5py.File(str(self.root / frame_hd5_file), "r")
+        return self._hd5_frame
+
+    def _load_samples(self) -> list[tuple[int, ProcessedSampleWrapper]]:
+        videos = list(self.hd5_frame.keys())
+        samples = []
+        for i in videos:
+            frames = self.hd5_frame[i]["frames"]
+            video_wrap = ProcessedSampleWrapper(frames, i, self.root/f"{i}.midi", self.root/f"{i}_video_details.txt", self.config)
+            for j in video_wrap.get_samples():
+                samples += [(j, video_wrap)]
+
+        return samples
+
+    def _get_lab(self, idx):
+        sample = self.samples[idx]
+        onset = sample[1].midi_wrapper.oo_array[..., sample[0]]
+        frame = sample[1].midi_wrapper.f_array[..., sample[0]]
+        return {"onsets": onset, "frames": frame}
+
+    def _get_vid(self, idx) -> torch.Tensor:
+        """Load a video from the saved frames in a sample
         """
-        Parameters
-        ----------
-        datasets : SAMPLE_TYPE
-            [[midi_path, flac_path, video_path, bounding_box, rotate 180]]
-        epoch_size : Optional[int]
-        frame_transform : Optional[Callable]
-        video_transform : Optional[Callable]
-            whether to shuffle the dataset every time a new generator loop is
-            started.
-        temporal_res : Optional[float]
-            The distance in seconds between yielded frames.
-        step : Optional[int]
-            The amount of frames between consecutive sequences
-        """
-        if temporal_res is None:
-            temporal_res = .03333
-        if temporal_size is None:
-            temporal_size = .54
-        if dataset_max_framerate is None:
-            dataset_max_framerate = 30
-        if epoch_size is None:
-            epoch_size = 1
-        if step is None:
-            step = 1
-        if cachefile_name is None:
-            cachefile_name = "./ppan_cache.txt"
-
-        self.batch_size = batch_size
-        self.lenience = 1
-        self.max_iters_per_epoch = max_iters_per_epoch
-        self.cachefile_name = cachefile_name
-        self.step = step
-        self.dataset = datasets
-        self.temporal_res = temporal_res
-        self.temporal_size = temporal_size
-        dataset_frametime = 1 / dataset_max_framerate
-        self.no_frames_per_clip = int(self.temporal_size // dataset_frametime)
-        self.temporal_res_frames = int(self.temporal_size // self.temporal_res)
-        self.epoch_size: int = epoch_size
-
-        self.frame_transform = frame_transform
-        self.video_transform = video_transform
-        self._file_list = None
-        self.midi_cache: dict[int, PPAnMidi] = {}
-
-        self._augment = None
-        r_resize_int = os.environ.get(
-            "PPAN_AUG_CROP_JITTER", None)
-        if r_resize_int is not None:
-            r_resize_int = tuple([int(i) for i in r_resize_int.split(":")])
-        self.rand_resize_interval: Optional[tuple[int, int]] = r_resize_int
-        self.do_stack: bool = os.environ.get("PPAN_AUG_STACK", "True") == "True"
-        self.dali_iter = self.get_iter()
-
-        if target_epoch is not None:
-            self.target_iteration = len(self) * target_epoch
-
-    def __call__(self, *args, **kwargs):
-        return self.__iter__()
+        sample = self.samples[idx]
+        video = sample[1].video_wrapper.get_frame_window(sample[0]).to(device, non_blocking=True)
+        return self.video_processor(video)
 
     def __len__(self):
-        iter_len = len(self.dali_iter) * int(os.environ.get("PPAN_NO_GPU", 1))
-        if self.max_iters_per_epoch is None:
-            return self.epoch_size * iter_len
-        return self.epoch_size * min(iter_len, self.max_iters_per_epoch)
+        return len(self.samples)
 
-    def __iter__(self) -> dict[str, torch.Tensor]:
-        for epoch in range(self.epoch_size):
-            iter_no = 0
-            for vals in self.dali_iter:
-                for val in vals:
-                    yield self.finish_processing(val)
-                    iter_no += 1
-                    if self.max_iters_per_epoch is not None:
-                        if iter_no >= self.max_iters_per_epoch:
-                            break
-                if self.max_iters_per_epoch is not None:
-                    if iter_no >= self.max_iters_per_epoch:
-                        break
-            # New epoch, we need to start from zero with the iterator
-            self.dali_iter.reset()
+    def __getitem__(self, idx) -> (tuple[torch.Tensor, torch.Tensor] |
+                                   dict[str, torch.Tensor]):
+        out = {}
+        if self.vid_key is not None:
+            out[self.vid_key] = self._get_vid(idx)
+        if self.onsets_key is None and self.frames_key is None:
+            return out
+        labs = self._get_lab(idx)
+        if self.onsets_key is not None:
+            out[self.onsets_key] = torch.tensor(labs["onsets"], device=device).to(device, non_blocking=True).float()
+        if self.frames_key is not None:
+            out[self.frames_key] = torch.tensor(labs["frames"], device=device).to(device, non_blocking=True).float()
+        return out
 
-    @abstractmethod
-    def finish_processing(self, vals):
-        ...
 
-    @abstractmethod
-    def get_video_reader(self, num_gpus, d_id) -> fn.readers.video:
-        ...
+class ProcessedSampleWrapper:
+    """Helper for handling each individual sample. Keeps track of the frame and
+    MIDI objects and provides a sampler.
+    """
+    MIDI_FILE = "data.midi"
+    def __init__(self, frames, cache_prefix: str, midi_path: Path, details_file: Path, config: DatasetConfig) -> None:
+        self.config = config
+        self.video_wrapper = FramedVideoWrapper(
+            details_file,
+            frames,
+            window_size=config.window_size,
+            stride=config.stride,
+            cache_prefix=cache_prefix,
+            cache_dict=config.shared_dict
+        )
+        self.midi_wrapper: PPAnMidi = PPAnMidi(
+            n_frames=self.video_wrapper.n_frames,
+            temporal_res=self.video_wrapper.frametime,
+            lenience=config.lenience
+        ).set_midi(str(midi_path))
+
+    def get_samples(self):
+        n_frames = self.video_wrapper.n_frames
+        half_window = self.config.window_size // 2
+        samples = list(range(half_window, n_frames-half_window))
+        return samples
+
+
+class FramedVideoWrapper:
+    """Convenience class that can handle automatically loading frames from a
+    processed video folder.
+    """
+    FRAME_PREFIX: str = "frame_"
+    FRAME_EXTENSION: str = ".jpeg"
+    DETAILS_FILE: str = "video_details.txt"
+
+    def __init__(self, details_file, frame_data, window_size: int, stride: int, cache_prefix: str, cache_dict: Optional[dict] = None):
+        self.details_file = details_file
+        self.frames = frame_data
+        self.n_frames: int = frame_data.shape[0]
+        self._duration = None
+        self.frametime: float =  self.duration / self.n_frames
+        self.frame_idxs = np.array([i * stride for i in range(-window_size//2, window_size//2)])
+        self.cache: Optional[dict] = cache_dict
+        self.cache_prefix = cache_prefix
+        self.cache_index = torch.tensor([False for _ in range(self.frames.shape[0])], dtype=torch.bool)
 
     @property
-    @abstractmethod
-    def augmentations(self):
-        ...
+    def duration(self) -> float:
+        if self._duration is None:
+            with open(self.details_file) as f:
+                details = [i.split(": ") for i in f.readlines()]
+            details = {
+                key: val for key, val in details
+            }
+            self._duration = float(details["duration"])
+        return self._duration
 
-    def get_iter(self):
-        n = int(os.environ.get("PPAN_NO_GPU", 1))
-        num_threads = 4
-        pipes = [
-            self.video_pipe(
-                batch_size=self.batch_size,
-                num_threads=num_threads,
-                device_id=i,
-                seed=seed,
-                num_gpus=n,
-                d_id=i
-            ) for i in range(n)
-        ]
-        dali_iter = DALIGenericIterator(
-            pipes,
-            ['pixel_values', 'label', 'note_vec',
-             'timestamps'],
-            reader_name="VideoReader"
-        )
-        return dali_iter
+    def get_frames(self, frames: npt.NDArray[int]):
+        if self.cache is not None:
+            not_in_cache = ~self.cache_index[frames]
+            if torch.any(not_in_cache):
+                for i in torch.where(not_in_cache)[0]:
+                    frame_data = self.frames[frames[i]]
+                    self.cache[self.cache_prefix+str(int(frames[i]))] = frame_data
+                    self.cache_index[frames[i]] = True
 
-    def get_midi(self, sample_idx) -> PPAnMidi:
-        """Get the PPaNMidi object for a sample. All objects are
-        automatically cached for future use.
-        """
-        if sample_idx not in self.midi_cache:
-            sample = self.dataset[sample_idx]
-            vid_len = MultimediaTools().ff_probe(sample[2])
-            vid_len = float(vid_len["streams"][0]["duration"])
-            midi_path = sample[0]
-            midi = PPAnMidi(temporal_res=self.temporal_res,
-                            lenience=self.lenience,
-                            vid_len=vid_len)
-            midi.set_midi(midi_path)
-            self.midi_cache[sample_idx] = midi
+            return [torch.tensor(self.cache[self.cache_prefix+str(int(i))]) for i in frames]
 
-        return self.midi_cache[sample_idx]
+        return [torch.tensor(i) for i in self.frames[frames]]
 
-    @staticmethod
-    def plot_image(img_tensor: torch.Tensor):
-        """Plot a tensor image."""
-        import matplotlib.pyplot as plt
-        img_tensor = torch.swapaxes(img_tensor, 0, 2)
-        img = img_tensor.detach().cpu()
-        plt.figure()
-        plt.imshow(img)
-        plt.show()
-
-    @staticmethod
-    def do_crop(video: torch.Tensor,
-                box: torchvision.tv_tensors.TVTensor) -> torch.tensor:
-        """Apply a crop using a bounding box."""
-        bbx = v2.ConvertBoundingBoxFormat("XYWH")(box)
-        return functional.crop(
-            video, bbx[0, 0], bbx[0, 1], bbx[0, 2], bbx[0, 3])
-
-    def midi_pipe_pytorch(self, label: torch.Tensor,
-                          timestamps: torch.Tensor):
-        """Load labels from the correct MIDI file.
-        """
-        if self.dataset[label[0].item()][0] is None:
-            return torch.tensor([0], device=label.device)
-
-        midi = self.get_midi(label[0].item())
-        # If the number of frames is even, we take the average between
-        # the two middle frames. This means if one is positive and one
-        # negative, we get a value of 0.5 instead of 1 or 0.
-        if timestamps.shape[0] % 2 == 0:
-            mid = timestamps.shape[0] // 2
-            time_1 = timestamps[mid]
-            time_2 = timestamps[mid+1]
-            notes_vec_1 = midi(
-                time_1,
-                device=label.device,
-                dtype=torch.float
-            )
-            notes_vec_2 = midi(
-                time_2,
-                device=label.device,
-                dtype=torch.float
-            )
-            notes_vec = torch.logical_or(notes_vec_1, notes_vec_2).float()
-        # If the number of frames is odd, we can just use the middle one.
-        else:
-            time = timestamps[timestamps.shape[0] // 2]
-            notes_vec = midi(
-                time,
-                device=label.device,
-                dtype=torch.float
-            )
-        return notes_vec
-
-    def video_pipe_pytorch(self, video: torch.Tensor,
-                           label: torch.Tensor):
-        sample = self.dataset[label]
-        crop = sample[3]
-        rotate_180 = sample[4]
-        random_resize = sample[5]
-
-        # Some videos are the wrong resolution smh my head
-        if video.shape[-1] == 1920 and abs(crop[-1] - 1280) < 50 and crop[-2] < 50:
-            video = v2.functional.resize(video, [720, 1280])
-        if video.shape[-1] == 1280 and abs(crop[-1] - 1920) < 50 and crop[-2] < 50:
-            video = v2.functional.resize(video, [1080, 1920])
-
-        if crop is not None:
-            crop = torch.tensor(crop)
-            if random_resize:
-                # Randomly resize the crop as an augmentation
-                rand_am = torch.randint(
-                    self.rand_resize_interval[0],
-                    self.rand_resize_interval[1],
-                    [4]
-                )
-                # We either have to subtract or add depending on whether
-                # it's the left edge, right edge, top edge or bottom edge.
-                crop[[1, 3]] += rand_am[:2]
-                crop[[0, 2]] -= rand_am[2:]
-
-            box = tv_tensors.BoundingBoxes(
-                torch.tensor([crop[0], crop[2], crop[1], crop[3]]),
-                format=tv_tensors.BoundingBoxFormat("XYXY"),
-                canvas_size=video.shape[2:]
-            )
-            video = self.do_crop(video, box)
-
-        if self.do_stack:
-            video = functional.resize(
-                video,
-                [self.video_transform.crop_size["height"] // 2,
-                 self.video_transform.crop_size["width"] * 2]
-            )
-        else:
-            video = functional.resize(
-                video,
-                [self.video_transform.crop_size["height"],
-                 self.video_transform.crop_size["width"]]
-            )
-
-        # Rotate the video into the correct orientation.
-        if rotate_180:
-            video = functional.rotate(video, 180)
-
-        try:
-            if sample[6] is not None:
-                video = functional.hflip(video)
-        except IndexError:
-            pass
-
-        if self.do_stack:
-            # Wrap the rectangle such that it fits into a square better.
-            vid_size = list(video.size())
-            vid_size[-2] = vid_size[-2] * 2
-            vid_size[-1] = vid_size[-1] // 2
-            wrapped = torch.zeros(size=vid_size, dtype=video.dtype).to(video.device)
-            wrapped[..., :video.shape[-2], :] = video[..., :vid_size[-1]]
-            wrapped[..., video.shape[-2]:, :] = video[..., vid_size[-1]:vid_size[-1]*2]
-            video = wrapped
-
-        # Apply augmentations to the cropped video
-        video = self.augmentations(video)
-
+    def get_video(self, frames: npt.NDArray[int]):
+        frame_data = self.get_frames(frames)
+        frames_decoded = torchvision.io.decode_jpeg(frame_data)
+        video = torch.stack(frames_decoded, dim=0)
         return video
 
-    @staticmethod
-    def _pad_to_square(video: torch.Tensor):
-        # Pad the video into a square shape to prevent any more
-        # changes to the aspect ratio.
-        shortest_dim = torch.argmin(torch.tensor(video.shape[-2:]))
-        max_dim = torch.argmax(torch.tensor(video.shape[-2:]))
+    def get_time_window(self, time: float):
+        """Get a window into the video centered at a certain time.
+        """
+        frame = round(time / self.frametime)
+        return self.get_frame_window(frame)
 
-        amount_to_pad = (video.shape[-2:][max_dim] -
-                         video.shape[-2:][shortest_dim])
-        if shortest_dim == 1:
-            video = v2.functional.pad(video, [amount_to_pad, 0])
-        else:
-            video = v2.functional.pad(video, [0, amount_to_pad])
-        return video
-
-    def file_list(self) -> str:
-        if not os.path.exists(self.cachefile_name):
-            self._file_list = self._get_file_list()
-            with open(self.cachefile_name, "wb") as f:
-                f.writelines([str.encode(i) for i in self._file_list])
-        return self.cachefile_name
-
-    def _get_file_list(self) -> str:
-        pad = (self.no_frames_per_clip // 2) * self.temporal_res
-        file_list = []
-        for sample_idx in range(len(self.dataset)):
-            file_list.append(self.get_midi(
-                sample_idx
-            ).generate_filelist_labs(
-                self.dataset[sample_idx][2], sample_idx, pad)
-            )
-        return "\n".join(file_list)
-
-    @pipeline_def()
-    def video_pipe(self, num_gpus: int, d_id: int):
-        video, label, timestamps = self.get_video_reader(
-            num_gpus, d_id
-        )
-        video = fn.transpose(video, perm=[0, 3, 1, 2])
-        video = pfn.torch_python_function(
-            video, label,
-            function=self.video_pipe_pytorch
-        )
-        note_vec = pfn.torch_python_function(
-            label,
-            timestamps,
-            function=self.midi_pipe_pytorch
-        )
-        return video, label, note_vec, timestamps
-
-    def _get_color_augmentation(self):
-        if os.environ.get("PPAN_AUG_GREYSCALE", "True") == "False":
-            if self.video_transform is not None:
-                if self.video_transform.do_normalize:
-                    return v2.Normalize(mean=self.video_transform.image_mean,
-                                        std=self.video_transform.image_std)
-        else:
-            return v2.Grayscale(num_output_channels=3)
+    def get_frame_window(self, frame: int):
+        """Get a window into the video centered at a certain frame.
+        """
+        idxs = self.frame_idxs + frame
+        return self.get_video(idxs)
 
 
-class PPAnTrainDataset(BaseDataset):
-    """
-    Dataset object for training on a video/midi dataset such as Rach3.
-    Handles loading, preprocessing, and batching all necessary files.
-    """
-    BRIGHTNESS_JITTER = 0.01
-    GAUSSIAN_MEAN = 0
-    GAUSSIAN_STDDEV = 0.01
-
-    @property
-    def augmentations(self):
-        if self._augment is None:
-            self._augment = v2.Compose([
-                v2.ToDtype(torch.float, scale=True),
-                v2.RandomApply([
-                    v2.ColorJitter(brightness=self.BRIGHTNESS_JITTER),
-                    v2.GaussianNoise(mean=self.GAUSSIAN_MEAN,
-                                     sigma=self.GAUSSIAN_STDDEV),
-                ], p=0.4),
-                self._get_color_augmentation()])
-        return self._augment
-
-    def finish_processing(self, vals):
-        return {'pixel_values': vals['pixel_values'],
-                'labels': vals['note_vec']}
-
-    def get_video_reader(self, num_gpus, d_id
-                         ) -> fn.readers.video:
-        return fn.readers.video(
-            device="gpu",
-            file_list=self.file_list(),
-            enable_timestamps=True,
-            sequence_length=self.no_frames_per_clip,
-            shard_id=d_id,
-            random_shuffle=True,
-            initial_fill=2,
-            name=f"VideoReader",
-            step=self.step,
-            file_list_include_preceding_frame=True,
-            num_shards=num_gpus
-        )
-
-
-class PPAnEvalDataset(BaseDataset):
-    """
-    For evaluating on a video/midi dataset. Loads clips sequentially and
-    returns the timestamp.
-    """
-    @property
-    def augmentations(self):
-        if self._augment is None:
-            self._augment = v2.Compose([v2.ToDtype(torch.float, scale=True),
-                                        self._get_color_augmentation()])
-        return self._augment
-
-    def finish_processing(self, vals):
-        return {'pixel_values': vals['pixel_values'],
-                'labels': vals['note_vec'],
-                'timestamps': vals['timestamps'],
-                'file_idx': vals['label']}
-
-    def get_all_video_samples(self):
-        all_vids = []
-        [all_vids.append(str(i[2])) for i in self.dataset]
-        return all_vids
-
-    def get_video_reader(self, num_gpus, d_id) -> fn.readers.video:
-        return fn.readers.video(
-            device="gpu",
-            filenames=self.get_all_video_samples(),
-            labels=[],
-            enable_timestamps=True,
-            sequence_length=self.no_frames_per_clip,
-            shard_id=d_id,
-            num_shards=num_gpus,
-            random_shuffle=False,
-            initial_fill=2,
-            name=f"VideoReader",
-            step=self.step,
-            file_list_include_preceding_frame=True,
-        )
-
-
-def load_rach3(root: PathLike):
-    """
-    Load the dataset for use with PPAn.
-
-    Parameters
-    ----------
-    root : PathLike
-
-    Returns
-    -------
-    test : List[Tuple[PathLike, PathLike, PathLike]]
-    train : List[Tuple[PathLike, PathLike, PathLike]]
-    """
-    root = Path(root)
-    test, train = root / "test", root / "train"
-    bbs_path = root / "rach3_bounding_boxes.json"
-
-    with open(bbs_path, "r") as f:
-        bbs = json.load(f)
-    bbs = {i["session_id"]: i["box"] for i in bbs}
-
-    return (load_rach3_split(test, bbs, False),
-            load_rach3_split(train, bbs, True))
-
-
-def load_rach3_split(root: PathLike,
-                     bbs: dict,
-                     augment: bool) -> SAMPLE_TYPE:
-    """
-    Load a folder containing Rach3 files (such as test or train folders)
-
-    Parameters
-    ----------
-    root : PathLike
-    bbs : dict
-    augment : bool
-
-    Returns
-    -------
-    samples : SAMPLE_TYPE
-    """
-    dataset = DatasetUtils(root)
-    sessions = dataset.remove_noncomplete(
-        subsession_list=dataset.get_sessions(),
-        required=["midi.splits_list", "flac.splits_list",
-                  "video.splits_list"]
-    )
-    samples: SAMPLE_TYPE = []
-    for i in sessions:
-        bb_meta = bbs[str(i.id)][0]["box"]
-        bb = (round(bb_meta["y1"]), round(bb_meta["y2"]),
-              round(bb_meta["x1"]), round(bb_meta["x2"]))
-        crops = [bb for _ in range(len(i.midi.splits_list))]
-        [samples.append(j) for j in zip(i.midi.splits_list,
-                                        i.flac.splits_list,
-                                        i.video.splits_list,
-                                        crops,
-                                        [False for _ in range(len(crops))],
-                                        [augment for _ in range(len(crops))])]
+def get_samples(root: Path):
+    cmd = f'ls {str(root)}'
+    cmd_out = os.popen(cmd).read().split("\n")
+    samples = sorted([root / i for i in cmd_out if i])
     return samples
 
 
-def load_pianoyt(root: PathLike) -> TEST_TRAIN_SPLIT:
-    data = []
-    with open(os.path.join(root, "dataset.csv"), "r") as f:
-        reader = csv.reader(f)
-        [data.append(i) for i in reader]
-
-    samples_train = []
-    samples_test = []
-    for i in data:
-        video = os.path.join(root, f'processed_videos/{Path(i[0]).name}')
-        video = video.replace(" ", "_")
-        crop = [int(j) for j in i[4:]]
-        crop = [crop[0], crop[1], crop[2], crop[3]]
-        tup = [os.path.join(root, f'pianoyt_MIDI/audio_{i[1]}.0.midi'),
-               None, video, crop, True, True]
-        if i[3] == "1":
-            samples_train.append(tup)
-        elif i[3] == "3":
-            tup[-1] = False
-            samples_test.append(tup)
-
-    return samples_test, samples_train
-
-
-def load_miditest(root) -> list[SAMPLE_TYPE]:
-    midi_root = os.path.join(root, "miditest_MIDI")
-    midi_files = os.listdir(midi_root)
-    midi_files = [os.path.join(midi_root, i) for i in midi_files]
-    videos_root = os.path.join(root, "miditest_processed_videos")
-    videos = os.listdir(videos_root)
-    videos = [os.path.join(videos_root, i) for i in videos]
-    none = [None for _ in midi_files]
-    true = [True for _ in midi_files]
-    false = [False for _ in midi_files]
-    return list(zip(midi_files, none, videos, none, true, false))
-
-
-def load_all_data(rach3_dir: Optional[PathLike] = None,
-                  pianoyt_dir: Optional[PathLike] = None,
-                  miditest_dir: Optional[PathLike] = None):
-    """Load Rach3, pianoYT, and Miditest and put them into train, test and
-    validation splits.
+def split_samples(samples, val_perc: float = 0.05):
+    """Split samples into train and validaiton sets.
     """
-    test = []
-    train = []
-    miditest = None
-    pianoyt_test = None
-    rach3_test = None
-    if rach3_dir is not None:
-        rach3_test, rach3_train = load_rach3(rach3_dir)
-        test.extend(rach3_test)
-        train.extend(rach3_train)
-    if pianoyt_dir is not None:
-        pianoyt_test, pianoyt_train = load_pianoyt(pianoyt_dir)
-        test.extend(pianoyt_test)
-        train.extend(pianoyt_train)
-    if miditest_dir is not None:
-        miditest = load_miditest(miditest_dir)
-
-    return test, train, miditest, pianoyt_test, rach3_test
-
-
-def calculate_bounding_boxes(samples, yolo_model_checkpoint) -> list[SAMPLE_TYPE]:
-    """
-    Get bounding box predictions for a list of samples.
-    Utilizes the Ultralytics package.
-
-    Parameters
-    ----------
-    samples : list[ppan.dataset.SAMPLE_TYPE]
-    yolo_model_checkpoint : PathLike
-
-    Returns
-    -------
-    samples : ppan.dataset.SAMPLE_TYPE
-        The same samples as passed in but with bounding boxes added.
-    """
-    # Load the model
-    model = YOLO(yolo_model_checkpoint)
-
-    new_samples = []
-    for sample in tqdm(samples, desc="Calculating Bounding Boxes"):
-        sample_preds = []
-        video = sample[2]
-        pred = model.predict(source=str(video), stream=True,
-                             verbose=False, vid_stride=5)
-        # Get predictions over the first 10 seconds.
-        [sample_preds.append(next(pred)) for _ in range(5*10)]
-
-        filtered_session_preds = [
-            i for i in sample_preds if i.boxes.conf.shape[0] > 0
-        ]
-        best_pred = max(filtered_session_preds, key=lambda x: x.boxes.conf[0])
-        bb_meta = json.loads(best_pred.tojson())[0]['box']
-        bb = (round(bb_meta["y1"]), round(bb_meta["y2"]),
-              round(bb_meta["x1"]), round(bb_meta["x2"]))
-        new_sample = [i for i in sample]
-        new_sample[3] = bb
-        new_samples.append(new_sample)
-    return new_samples
-
-
-def load_omaps(root: PathLike) -> TEST_TRAIN_SPLIT:
-    """
-    Load all samples for the OMAPS dataset for use with PPAN.
-
-    Returns
-    -------
-    samples : list[SAMPLE_TYPE]
-    """
-    test_dir = os.path.join(root, "test")
-#    train_dir = os.path.join(root, "train")
-
-    return _load_omaps_split(test_dir), None# _load_omaps_split(train_dir)
-
-
-def _load_omaps_split(root: PathLike) -> list[SAMPLE_TYPE]:
-    """Load a train or test split for the OMAPS dataset.
-    """
-    videos = [os.path.join(root, i) for i in
-              sorted(glob.glob("*.mp4", root_dir=root))]
-    labels = [os.path.join(root, i) for i in
-              sorted(glob.glob("*.txt", root_dir=root))]
-    none = [None for _ in videos]
-    true = [True for _ in videos]
-    false = [False for _ in videos]
-    samples = list(zip(none, none, videos, none, true, false, labels))
-#    samples = calculate_bounding_boxes(
-#        samples,
-#        "./model_weights/piano-detector-yolov8s.pt"
-#    )
-    return samples
-
+    n_val = round(val_perc * len(samples))
+    val = random.sample(samples, n_val)
+    train = set(samples) - set(val)
+    return list(train), val

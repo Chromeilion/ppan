@@ -16,14 +16,13 @@ from rach3datautils.utils.multimedia import MultimediaTools
 from scipy.ndimage import gaussian_filter
 from torch import no_grad
 from tqdm import tqdm
-from transformers import (
-    VideoMAEForVideoClassification,
-    VideoMAEImageProcessor
-)
 
-from ppan.config import pretrained_model, fps, temporal_res, device
-from ppan.dataset import load_all_data, load_omaps, PPAnEvalDataset
+from ppan.config import fps, temporal_res, device, processed_temporal_size, model_no_frames
+from ppan.utils import load_all_data
 from ppan.midi import PPAnMidi
+from ppan.preprocessor import DatasetProcessor
+from ppan.model import PPANModel, PPANVideoProcessor
+
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -32,16 +31,18 @@ PathLike = Union[str, bytes, os.PathLike]
 global filecounter
 filecounter = 0
 
+
 def evaluate(preds_output: PathLike,
              model_checkpoint: PathLike,
-             rach3_dir: Optional[PathLike] = None,
+             rach3_s_dir: Optional[PathLike] = None,
+             rach3_x_dir: Optional[PathLike] = None,
              pianoyt_dir: Optional[PathLike] = None,
              miditest_dir: Optional[PathLike] = None,
              midi_output: Optional[PathLike] = None,
              threshold: Optional[float] = None,
              batch_size: Optional[int] = None,
              *_, **__):
-    if not [i for i in [rach3_dir, pianoyt_dir, miditest_dir] if i is not None]:
+    if not [i for i in [rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir] if i is not None]:
         raise AttributeError("A dataset directory is required to run "
                              "evaluation.")
     if preds_output is None:
@@ -55,99 +56,130 @@ def evaluate(preds_output: PathLike,
         threshold = 0.5
     if batch_size is None:
         batch_size = 2
-    gaussian_sigma = 1
+    else:
+        batch_size = int(batch_size)
+    gaussian_sigma = 0.2
+    gaussian_sigma_frames = 0.5
 
-    _, _, miditest, pianoyt_test, rach3_test = load_all_data(
-        rach3_dir, pianoyt_dir, miditest_dir
+    # TODO: Get up to date with the rest of the codebase
+    _, _, miditest, pianoyt_test, rach3_s_test, rach3_x_test = load_all_data(
+        rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir
     )
-    omaps_test, _ = load_omaps(os.environ["PPAN_OMAPS_DIR"])
-    datasets = [omaps_test, rach3_test, miditest, pianoyt_test]
-    dataset_names = ["omaps", "rach3", "miditest", "pianoyt"]
+#    omaps_test, _ = load_omaps(os.environ["PPAN_OMAPS_DIR"])
+#    datasets = [omaps_test, rach3_test, miditest, pianoyt_test]
+#    dataset_names = ["omaps", "rach3", "miditest", "pianoyt"]
+    datasets = [rach3_s_test, rach3_x_test, miditest, pianoyt_test]
+    dataset_names = ["r3s", "r3x", "miditest", "pianoyt"]
+
     [evaluate_on_dataset(
         i,
         dataset_name=j,
         model_checkpoint=model_checkpoint,
         batch_size=batch_size,
         gaussian_sigma=gaussian_sigma,
+        gaussian_sigma_frames=gaussian_sigma_frames,
         threshold=threshold,
         midi_output=midi_output
     ) for i, j in zip(datasets, dataset_names) if i is not None]
 
 
 def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
-                        gaussian_sigma, threshold, midi_output):
+                        gaussian_sigma, gaussian_sigma_frames, threshold, midi_output):
     preds_output = Path(dataset_name+"_preds.pkl")
-    if not preds_output.exists() and False:
-        processor = VideoMAEImageProcessor.from_pretrained(
-            pretrained_model
-        )
-        dataset = PPAnEvalDataset(
-            datasets=[samples[5]],
+    if not preds_output.exists():
+        model = PPANModel.from_pretrained(
+            model_checkpoint
+        ).eval().to(device)
+        processor = PPANVideoProcessor()
+        dataset = DatasetProcessor(
+            datasets=samples,
             video_transform=processor,
-            batch_size=batch_size,
-            step=1
+            batch_size=1,
+            temporal_size=model.config.num_frames/30,
+            epoch_size=1,
+            step=1,
+            cachefile_name=f"{dataset_name}_cache.txt"
         )
         with no_grad():
             preds_rach3 = eval_loop(dataset=dataset,
-                                    model_checkpoint=model_checkpoint)
+                                    model=model)
 
         with open(preds_output, "wb") as f:
             pickle.dump(obj=preds_rach3, file=f)
     else:
-        try:
-            with open(preds_output, "rb") as f:
-                preds_rach3 = pickle.load(f)
-        except:
-            return
-    mir_stats = np.zeros(4)
+        with open(preds_output, "rb") as f:
+            preds_rach3 = pickle.load(f)
+            # The saved preds may be from a different machine, therefore,
+            # we fix the paths here.
+
+        fixed_preds = {}
+        for key, val in preds_rach3.items():
+            p_name = Path(key).name
+            all_vid_names = [Path(i.video_path).name for i in samples]
+            fixed_preds[samples[all_vid_names.index(p_name)].video_path] = preds_rach3[key]
+
+        preds_rach3 = fixed_preds
+
+    mir_stats = [np.zeros(4), np.zeros(4), np.zeros(3)]
     all_stats = []
     all_vid_paths = []
     for vid_path, preds in preds_rach3.items():
+        video_len = float(MultimediaTools().ff_probe(vid_path)["streams"][0]["duration"])
+        pred_step = video_len / max([i[1] for i in preds])
+        preds = [(i[0], i[1]*pred_step) for i in preds]
         final_pred = calc_time(preds)
-        onset_array = final_pred_to_onset_array(final_pred, threshold,
-                                                gaussian_sigma)
-        onset_array = onset_array.astype(int) * 100
-        session_files = [i for i in samples if os.path.basename(vid_path) in os.path.basename(str(i[2]))][0]
-        vid_len = MultimediaTools().ff_probe(session_files[2])
-        vid_len = float(vid_len["streams"][0]["duration"])
+        final_pred_onset = [(i[0], i[1][0].squeeze()) for i in final_pred]
+        final_pred_frame = [(i[0], i[1][1].squeeze()) for i in final_pred]
+        pianoroll = final_pred_to_onset_offset_array(
+            final_pred_onset, final_pred_frame, threshold, gaussian_sigma, gaussian_sigma_frames
+        )
+        pianoroll = pianoroll.astype(int) * 100
+        session_files = [i for i in samples if os.path.basename(vid_path) in os.path.basename(str(i.video_path))][0]
+        vid_len = MultimediaTools().get_decoded_duration(session_files.video_path)
         try:
-            labels = session_files[6]
-        except IndexError:
+            labels = session_files.labels
+        except AttributeError:
             labels = PPAnMidi(vid_len, temporal_res, 0)
-            labels.set_midi(session_files[0])
+            labels.set_midi(session_files.midi_path)
 
-        loc_mir_stats = np.array(calc_stats(
+        vid_framerate = vid_len/pianoroll.shape[1]
+        loc_mir_stats = calc_stats(
             midi=labels,
-            onset_array=onset_array
-        ))
+            pianoroll=pianoroll,
+            framerate=vid_framerate
+        )
         all_stats.append(loc_mir_stats)
         all_vid_paths.append(vid_path)
-        mir_stats += loc_mir_stats
+        for i, stats in enumerate(loc_mir_stats):
+            mir_stats[i] += np.array(stats)
         if midi_output is not None:
             vid_path = Path(vid_path)
             midi_output = Path(midi_output)
             midi_output.mkdir(exist_ok=True)
             mid_output = midi_output/(vid_path.stem + ".mid")
-            save_to_midi(onset_array, str(mid_output))
+            save_to_midi(pianoroll, str(mid_output))
     with open(f"./{dataset_name}_mir_stats.json", "w") as f:
-        json.dump(list(mir_stats/len(all_stats)), f)
-    np.save(f"./{dataset_name}_all_mir_stats", np.array(all_stats),
-            allow_pickle=False)
-    np.save(f"./{dataset_name}_all_mir_stats_files", np.array(all_vid_paths),
-            allow_pickle=False)
+        json.dump([list(i/len(all_stats)) for i in mir_stats], f)
+#    np.save(f"./{dataset_name}_all_mir_stats", np.array(all_stats),
+#            allow_pickle=True)
+#    np.save(f"./{dataset_name}_all_mir_stats_files", np.array(all_vid_paths),
+#            allow_pickle=True)
 
 
-def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
+def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold, sigma, sigma_frames) -> tuple[np.ndarray, np.ndarray]:
     """Take model predictions and create an onset array (basically a
-    pianoroll but with only onsets). When the model predicts a note over
-    multiple frames, the middle predicted frame is used as the onset.
-    Also smooths the model output using a gaussian.
+    pianoroll but with only onsets) and an offset array. When the model
+    predicts a note over multiple frames, the middle predicted frame is used
+    as the onset. Also smooths the model output using a gaussian.
     """
     pred_array = np.array([i[1] for i in final_pred]).astype(float)
     pred_array = gaussian_filter(pred_array, axes=[0], sigma=sigma,
-                                 radius=16)
+                                 radius=8)
     pred_array = pred_array > threshold
-    revised_preds = []
+    pred_array_frame = np.array([i[1] for i in final_pred_frame]).astype(float)
+    pred_array_frame = gaussian_filter(pred_array_frame, axes=[0], sigma=sigma_frames,
+                                 radius=4)
+    pred_array_frame = pred_array_frame > threshold
     nonzero_preds = pred_array.nonzero()
     nonzero_preds = list(zip(nonzero_preds[0], nonzero_preds[1]))
 
@@ -155,43 +187,35 @@ def final_pred_to_onset_array(final_pred, threshold, sigma) -> np.ndarray:
 
     p_x, p_y = nonzero_preds[0]
     pp_x = p_x
+    pianoroll = np.zeros(shape=pred_array.shape, dtype=np.bool_)
     for x, y in nonzero_preds[1:]:
         if y != p_y or x - 1 != pp_x:
             mid_idx = p_x + (pp_x - p_x) // 2
-            revised_preds.append((mid_idx, p_y))
+            pianoroll[mid_idx, p_y] = 1
+            current_frame = pred_array_frame[mid_idx, p_y]
+            while current_frame == 1 and mid_idx < pred_array_frame.shape[0]:
+                current_frame = pred_array_frame[mid_idx, p_y]
+                pianoroll[mid_idx, p_y] = 1
+                mid_idx += 1
             p_x = x
             p_y = y
         pp_x = x
 
-    onset_array = np.zeros(shape=pred_array.shape, dtype=np.bool_)
-    onset_array[
-        [i[0] for i in revised_preds], [i[1] for i in revised_preds]
-    ] = 1
-
-    # Sanity check to make sure we haven't messed anything obvious up
-    nonzero_onsets = onset_array.nonzero()
-    nonzero_onsets = list(zip(nonzero_onsets[0], nonzero_onsets[1]))
-    assert all([i in nonzero_preds for i in nonzero_onsets])
-
-    return onset_array.T
+    return pianoroll.T
 
 
-def eval_loop(dataset, model_checkpoint):
-    model = VideoMAEForVideoClassification.from_pretrained(
-        model_checkpoint
-    ).eval().to(device)
-
+def eval_loop(dataset, model):
     preds_dict = defaultdict(list)
     sig = nn.Sigmoid()
     for i in tqdm(dataset):
-        logits = model(i['pixel_values'].to(device)).logits
+        pixel_values = i['pixel_values'][:, :model.config.num_frames, ...].to(device)
+        model_out = model(pixel_values)
+        logits = model_out["logits"]
         preds = sig(logits)
-        all_files = dataset.get_all_video_samples()
-        for timestamps, file_idx, pred in zip(i['timestamps'].to(device),
-                                              i['file_idx'].to(device),
+        for timestamps, sample, pred in zip(i['times'].to(device),
+                                              i['sample'],
                                               preds):
-            vid_file = all_files[file_idx]
-            preds_dict[vid_file].append((pred.cpu().numpy(),
+            preds_dict[str(sample.video_path)].append((pred.cpu().numpy(),
                                          timestamps.cpu().numpy()))
 
     return preds_dict
@@ -223,7 +247,7 @@ def perf_to_int_pitch(perf):
         intervals = np.array(
             [[i['note_on'], i['note_off']] for i in perf[0].notes])
         equal = np.where(intervals[:, 1] <= intervals[:, 0])
-        if equal[0]:
+        if equal:
             intervals[equal, 1] += 0.0001
         pitches = np.array(
             [mir_eval.util.midi_to_hz(i['midi_pitch']) for i in perf[0].notes])
@@ -233,12 +257,10 @@ def perf_to_int_pitch(perf):
 def calc_perf_eval(pred_perf, true_perf):
     est_intervals, est_pitches = perf_to_int_pitch(pred_perf)
     ref_intervals, ref_pitches = perf_to_int_pitch(true_perf)
-    # This line is necessary because the model labels are actually
-    # calculated between two frames, therefore, to align the predictions
-    # properly, we need to shift everything half a frame. I'm not kidding
-    # when I say that given perfect predictions, the score would be zero
-    # without this shift.
-    est_intervals += temporal_res / 2.
+    # Shift our predictions forward 3 frames. I'm not 100% sure why this is
+    # necessary.
+    est_intervals[:, 0] += 3*temporal_res
+    est_intervals[:, 1] += 2.3*temporal_res
     savedir = Path("./trans_res")
     savedir.mkdir(exist_ok=True)
     resdic = {"est_intervals": [list(i) for i in list(est_intervals.astype(float))],
@@ -255,20 +277,30 @@ def calc_perf_eval(pred_perf, true_perf):
     with open(savedir/f"{filecounter}.json", "w") as f:
         json.dump(resdic, f)
     filecounter += 1
-    return mir_eval.transcription.precision_recall_f1_overlap(
+    return [mir_eval.transcription.precision_recall_f1_overlap(
+        est_intervals=est_intervals,
+        est_pitches=est_pitches,
+        ref_intervals=ref_intervals,
+        ref_pitches=ref_pitches
+    ),
+        mir_eval.transcription.precision_recall_f1_overlap(
         est_intervals=est_intervals,
         est_pitches=est_pitches,
         ref_intervals=ref_intervals,
         ref_pitches=ref_pitches,
-        offset_ratio=None,
-        onset_tolerance=temporal_res*3
-    )
+        offset_ratio=None
+        ),
+        mir_eval.transcription.offset_precision_recall_f1(
+            est_intervals=est_intervals,
+            ref_intervals=ref_intervals,
+        ),
+    ]
 
 
-def calc_stats(midi: PPAnMidi, onset_array: np.ndarray):
+def calc_stats(midi: PPAnMidi, pianoroll: np.ndarray, framerate: float):
     # MIR Eval stats
-    note_array_pred = pianoroll_to_notearray(onset_array,
-                                             time_div=fps,
+    note_array_pred = pianoroll_to_notearray(pianoroll,
+                                             time_div=30,
                                              time_unit="sec")
     performance_pred = Performance(
         PerformedPart.from_note_array(
@@ -287,18 +319,6 @@ def calc_stats(midi: PPAnMidi, onset_array: np.ndarray):
 def calc_time(preds):
     final_preds = []
     for pred, times in preds:
-        middle = times.shape[0] // 2
-        time = times[middle]
-        if times.shape[0] % 2 == 0:
-            time += times[middle+1]
-            time = time / 2.
+        time = times + model_no_frames/2
         final_preds.append((time, pred))
-    # Because the windows don't start at time zero, we need to insert a few
-    # frames at the start of the preds so that they start at zero.
-    no_to_insert = int(final_preds[0][0] / (1./30.))
-    [final_preds.insert(
-        0,
-        (temporal_res*i, np.zeros(shape=final_preds[0][1].shape,
-                                  dtype=np.bool_)))
-        for i in reversed(range(no_to_insert))]
     return final_preds

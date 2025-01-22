@@ -26,7 +26,13 @@ dependencies = [
     "torch",
     "pillow",
     "nvidia-dali-cuda120",
-    "wandb"
+    "wandb",
+    "av",
+    "moviepy",
+    "imageio",
+    "timm",
+    "pynvml",
+    "h5py"
 ]
 
 [project.urls]
@@ -35,3 +41,5 @@ Repository = "https://github.com/Chromeilion/ppan"
 [tool.setuptools.packages.find]
 include = ["ppan"]
 
+[project.scripts]
+ppan = "ppan.__main__:main"
