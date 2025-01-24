@@ -63,7 +63,7 @@ def train(dataset_dir: PathLike,
         raise AttributeError("The output directory is required for "
                              "model training.")
     if class_weights is None:
-        class_weights = finetune_default["class_weights"]
+        class_weights = [ONSET_WEIGHTS, FRAME_WEIGHTS]
     if class_weights[0] == "fancy":
         class_weights = [ONSET_WEIGHTS, FRAME_WEIGHTS]
     if frames_only is None:
