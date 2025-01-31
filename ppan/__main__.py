@@ -231,6 +231,19 @@ def main():
         default=os.environ.get("PPAN_TRAIN_LABEL_SMOOTHING_CONF_ONSET", None),
     )
     parser_train.add_argument(
+        "--model-architecture",
+        action="store",
+        help="What model architecture to use (vit_s, vit_b, cnn)",
+        default=os.environ.get("PPAN_TRAIN_MODEL_ARCHITECTURE", None),
+    )
+    parser_train.add_argument(
+        "--window-size",
+        action="store",
+        help="Number of frames to give to the model",
+        default=os.environ.get("PPAN_TRAIN_WINDOW_SIZE", None),
+        type=int,
+    )
+    parser_train.add_argument(
         "-m", "--momentum",
         action="store",
         help="Momentum parameter for SGD",
@@ -241,6 +254,13 @@ def main():
         action="store",
         help="Optimizer to use. Either 'adam' or 'sgd'",
         default=os.environ.get("PPAN_TRAIN_OPTIMIZER", None),
+    )
+    parser_train.add_argument(
+        "--image-size",
+        action="store",
+        help="H/W resolution of the model input frames as a tuple of ints",
+        default=os.environ.get("PPAN_TRAIN_IMAGE_SIZE", None),
+        type=json.loads
     )
     parser_train.set_defaults(func=run_train)
     # Command line for evaluation

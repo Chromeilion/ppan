@@ -5,7 +5,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig, PreTrainedModel, DefaultDataCollator
 from ppan.config import (PRETRAINED_MODEL_SMALL, model_no_frames,
                          model_resolution, model_crop_resolution)
-from ppan.utils import AsymmetricLossOptimized, get_vit
+from ppan.utils import get_backbone
 from ppan.dataset import BaseVideoProcessor
 from torchvision.tv_tensors import Video
 import torchvision.transforms.v2 as v2
@@ -121,7 +121,7 @@ class PPANModel(PreTrainedModel):
 
     def __init__(self, config: PPANConfig):
         super().__init__(config)
-        self.pretrained_model = get_vit(config)
+        self.pretrained_model = get_backbone(config)
 
         self.frame_loss_fn = nn.BCEWithLogitsLoss(
             pos_weight=torch.tensor(config.bce_weight_frame)
@@ -178,8 +178,11 @@ class PPANVideoProcessor(BaseVideoProcessor):
                  gaussian_noise: Optional[bool] = None,
                  color_jitter: Optional[bool] = None,
                  grayscale: Optional[bool] = None,
+                 resolution: tuple[int, int] = None,
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if resolution is None:
+            resolution = model_resolution
         if spatial_jitter is None:
             spatial_jitter = False
         if rand_erase is None:
@@ -213,7 +216,7 @@ class PPANVideoProcessor(BaseVideoProcessor):
         if rand_erase:
             augs.append(v2.RandomErasing())
 
-        augs.append(v2.Resize(model_resolution))
+        augs.append(v2.Resize(resolution))
         augs.append(v2.ToDtype(torch.float32, scale=True))
         if gaussian_noise:
             augs.append(v2.RandomApply([v2.GaussianNoise()], p=0.4))

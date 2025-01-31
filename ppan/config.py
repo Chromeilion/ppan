@@ -66,6 +66,7 @@ PRETRAINED_MODEL_SMALL = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/mai
 # Default pretraining settings
 no_epochs = 10
 finetune_default = {
+    "architecture": "vit_s",
     "optimizer": "adamw",
     "no_epochs": no_epochs,
     "batch_size": 96,
@@ -99,5 +100,6 @@ finetune_default = {
     "mixup_alpha": 0.2,
     "stride": 1,
     "window_size": 6,
-    "lenience": 1
+    "lenience": 1,
+    "image_size": None
 }
