@@ -182,6 +182,7 @@ class FramedVideoWrapper:
         self.n_frames: int = frame_data.shape[0]
         self._duration = None
         self.frametime: float =  self.duration / self.n_frames
+
         self.frame_idxs = np.array([i * stride for i in range(-window_size//2, window_size//2)])
         self.cache: Optional[dict] = cache_dict
         self.cache_prefix = cache_prefix

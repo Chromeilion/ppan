@@ -12,11 +12,10 @@ from transformers import (
     TrainingArguments,
     Trainer
 )
-from torch.multiprocessing import set_start_method
 from transformers.integrations import WandbCallback
 from timm.data.constants import IMAGENET_DEFAULT_STD, IMAGENET_DEFAULT_MEAN
 from ppan.config import seed, num_labels, finetune_default
-from ppan.dataset import PPANDataset, get_samples, DatasetConfig, OutputMap
+from ppan.dataset import PPANDataset, DatasetConfig, OutputMap
 from ppan.model import (PPANModel, PPANConfig, PPANVideoProcessor, PPANCollate,
                         FRAME_WEIGHTS, ONSET_WEIGHTS)
 
@@ -53,6 +52,9 @@ def train(dataset_dir: PathLike,
           frames_only: Optional[bool] = None,
           onsets_only: Optional[bool] = None,
           class_weights: Optional[tuple[list[float], list[float]]] = None,
+          model_architecture: Optional[str] = None,
+          window_size: Optional[int] = None,
+          image_size: Optional[int] = None,
           *_, **__):
     # The handling of default values is not done well right now, however it
     # works and we can change it later
@@ -62,6 +64,12 @@ def train(dataset_dir: PathLike,
     if output_dir is None:
         raise AttributeError("The output directory is required for "
                              "model training.")
+    if window_size is None:
+        window_size = finetune_default["window_size"]
+    if image_size is None:
+        image_size = finetune_default["image_size"]
+    if model_architecture is None:
+        model_architecture = finetune_default["architecture"]
     if class_weights is None:
         class_weights = [ONSET_WEIGHTS, FRAME_WEIGHTS]
     if class_weights[0] == "fancy":
@@ -128,7 +136,8 @@ def train(dataset_dir: PathLike,
                                    spatial_jitter=spatial_jitter,
                                    rand_erase=rand_erase,
                                    gaussian_noise=gaussian_noise,
-                                   color_jitter=color_jitter)
+                                   color_jitter=color_jitter,
+                                   resolution=image_size)
 
     # Remap the default dataset output dictionary keys to what our model expects
     output_map: OutputMap
@@ -155,18 +164,21 @@ def train(dataset_dir: PathLike,
         shared_dict_test = manager.dict()
 
     config = PPANConfig(
+        pretrained_encoder=model_architecture,
         confidence_frame=label_smoothing_conf_frame,
         confidence_onset=label_smoothing_conf_onset,
         dropout=dropout,
         drop_path=drop_path,
         bce_loss_weight_onset=class_weights[0],
-        bce_loss_weight_frame=class_weights[1]
+        bce_loss_weight_frame=class_weights[1],
+        num_frames=window_size,
+        image_size=image_size
     )
     train_ds_config = DatasetConfig(
         video_processor=processor,
         output_map=output_map,
         stride=finetune_default["stride"],
-        window_size=finetune_default["window_size"],
+        window_size=window_size,
         lenience=finetune_default["lenience"],
         shared_dict=shared_dict_train
     )
@@ -184,7 +196,7 @@ def train(dataset_dir: PathLike,
         video_processor=processor,
         output_map=output_map,
         stride=finetune_default["stride"],
-        window_size=finetune_default["window_size"],
+        window_size=window_size,
         lenience=finetune_default["lenience"],
         shared_dict=shared_dict_test,
         max_samples=1024
@@ -211,7 +223,6 @@ def train(dataset_dir: PathLike,
             momentum=momentum,
             weight_decay=weight_decay
         )
-
     training_arguments = TrainingArguments(
         ddp_find_unused_parameters=True,
         num_train_epochs=no_epochs,
@@ -237,7 +248,6 @@ def train(dataset_dir: PathLike,
         max_grad_norm=finetune_default["grad_clip"],
         label_names=[i for i in output_map.values() if i is not None]
     )
-
     trainer = Trainer(
         model=model,
         args=training_arguments,

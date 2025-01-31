@@ -21,6 +21,7 @@ from timm import create_model
 
 import ppan.model_mae
 from ppan.config import PathLike, TEST_TRAIN_SPLIT
+from ppan.s2s import S2SNet
 
 
 ds_prefixes = Literal["r3x", "r3s", "pianoyt", "miditest"]
@@ -489,72 +490,76 @@ def load_state_dict(model,
     if len(error_msgs) > 0:
         print('\n'.join(error_msgs))
 
-def get_vit(config):
+def get_backbone(config):
     """Load a VideoMAEv2 checkpoint and return the model. Based on code
     from:
     https://github.com/OpenGVLab/VideoMAEv2/
     """
-    model = create_model(
-        config.model,
-        img_size=config.image_size,
-        pretrained=False,
-        all_frames=config.num_frames,
-        tubelet_size=config.tubelet_size,
-        drop_rate=config.dropout,
-        drop_path_rate=config.drop_path,
-        attn_drop_rate=config.attn_drop_rate,
-        head_drop_rate=config.head_drop_rate,
-        drop_block_rate=None,
-        with_cp=False,
-        num_classes=88*2 # Onsets and frames
-    )
-    checkpoint = torch.hub.load_state_dict_from_url(
-        config.pretrained_encoder, map_location='cpu', check_hash=True)
+    num_classes = 88*2
+    if config.pretrained_encoder == "cnn":
+        return S2SNet(num_classes=num_classes)
+    if config.pretrained_encoder in ["vit_s", "vit_b"]:
+        model = create_model(
+            config.model,
+            img_size=config.image_size,
+            pretrained=False,
+            all_frames=config.num_frames,
+            tubelet_size=config.tubelet_size,
+            drop_rate=config.dropout,
+            drop_path_rate=config.drop_path,
+            attn_drop_rate=config.attn_drop_rate,
+            head_drop_rate=config.head_drop_rate,
+            drop_block_rate=None,
+            with_cp=False,
+            num_classes=num_classes # Onsets and frames
+        )
+        checkpoint = torch.hub.load_state_dict_from_url(
+            config.pretrained_encoder, map_location='cpu', check_hash=True)
 
-    print("Load ckpt from %s" % config.model)
-    checkpoint_model = None
-    for model_key in config.model_key.split('|'):
-        if model_key in checkpoint:
-            checkpoint_model = checkpoint[model_key]
-            print("Load state_dict by model_key = %s" % model_key)
-            break
-    if checkpoint_model is None:
-        checkpoint_model = checkpoint
-    for old_key in list(checkpoint_model.keys()):
-        if old_key.startswith('_orig_mod.'):
-            new_key = old_key[10:]
-            checkpoint_model[new_key] = checkpoint_model.pop(old_key)
+        print("Load ckpt from %s" % config.model)
+        checkpoint_model = None
+        for model_key in config.model_key.split('|'):
+            if model_key in checkpoint:
+                checkpoint_model = checkpoint[model_key]
+                print("Load state_dict by model_key = %s" % model_key)
+                break
+        if checkpoint_model is None:
+            checkpoint_model = checkpoint
+        for old_key in list(checkpoint_model.keys()):
+            if old_key.startswith('_orig_mod.'):
+                new_key = old_key[10:]
+                checkpoint_model[new_key] = checkpoint_model.pop(old_key)
 
-    state_dict = model.state_dict()
-    for k in ['head_1.weight', 'head_1.bias']:
-        if k in checkpoint_model and checkpoint_model[
-            k].shape != state_dict[k].shape:
-            print(f"Removing key {k} from pretrained checkpoint")
-            del checkpoint_model[k]
-    for k in ['head_2.weight', 'head_2.bias']:
-        if k in checkpoint_model and checkpoint_model[
-            k].shape != state_dict[k].shape:
-            print(f"Removing key {k} from pretrained checkpoint")
-            del checkpoint_model[k]
+        state_dict = model.state_dict()
+        for k in ['head_1.weight', 'head_1.bias']:
+            if k in checkpoint_model and checkpoint_model[
+                k].shape != state_dict[k].shape:
+                print(f"Removing key {k} from pretrained checkpoint")
+                del checkpoint_model[k]
+        for k in ['head_2.weight', 'head_2.bias']:
+            if k in checkpoint_model and checkpoint_model[
+                k].shape != state_dict[k].shape:
+                print(f"Removing key {k} from pretrained checkpoint")
+                del checkpoint_model[k]
 
-    all_keys = list(checkpoint_model.keys())
-    new_dict = OrderedDict()
-    for key in all_keys:
-        if key.startswith('backbone.'):
-            new_dict[key[9:]] = checkpoint_model[key]
-        elif key.startswith('encoder.'):
-            new_dict[key[8:]] = checkpoint_model[key]
-        else:
-            new_dict[key] = checkpoint_model[key]
-    checkpoint_model = new_dict
+        all_keys = list(checkpoint_model.keys())
+        new_dict = OrderedDict()
+        for key in all_keys:
+            if key.startswith('backbone.'):
+                new_dict[key[9:]] = checkpoint_model[key]
+            elif key.startswith('encoder.'):
+                new_dict[key[8:]] = checkpoint_model[key]
+            else:
+                new_dict[key] = checkpoint_model[key]
+        checkpoint_model = new_dict
 
-    load_state_dict(
-        model, checkpoint_model)
+        load_state_dict(
+            model, checkpoint_model)
 
-    n_parameters = sum(p.numel() for p in model.parameters()
-                       if p.requires_grad)
+        n_parameters = sum(p.numel() for p in model.parameters()
+                           if p.requires_grad)
 
-    print("Model = %s" % str(model))
-    print('number of params:', n_parameters)
+        print("Model = %s" % str(model))
+        print('number of params:', n_parameters)
 
     return model

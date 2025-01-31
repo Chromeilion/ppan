@@ -56,7 +56,7 @@ class SlopeModule(nn.Module):
         out = self.conv11(s)
         out = self.conv12(out)
         
-        # rearrange dimensions to performorm the expand operation
+        # rearrange dimensions to perform the expand operation
         out = torch.movedim(out, -1, 1)
         out = self.expand(out)
         out = torch.movedim(out, -1, 1)
@@ -87,11 +87,11 @@ class S2SNet(ResNet):
             self.bn1,
             self.relu,
             self.maxpool
-        )        
+        )
 
     @staticmethod
-    def _make_slope_vector(batch_size):
-        s = torch.arange(1, 89).float()
+    def _make_slope_vector(batch_size, device=None):
+        s = torch.arange(1, 89, device=device).float()
         s = s / 88
         s = s.view(1, 1, 88)
         s = s.repeat(batch_size, 1, 1)
@@ -100,14 +100,14 @@ class S2SNet(ResNet):
     def forward(self, x):
         # TODO: is this necessary to do at each forward pass?
         batch_size = x.shape[0]
-        s = self._make_slope_vector(batch_size)
+        s = self._make_slope_vector(batch_size, x.device)
 
         # pass each frame through block0 and stack them before aggregation
         # (we are initially treating each frame as a separate channel)
         # TODO: can this be parallelized?
         frame_stack = []
-        for i in range(x.shape[1]):
-            frame = x[:, i].unsqueeze(1)
+        for i in range(x.shape[2]):
+            frame = x[:, :, i].mean(dim=1, keepdim=True)
             frame_stack.append(self.block0(frame))
         x = torch.stack(frame_stack, dim=2)
         x = self.aggregation(x)
