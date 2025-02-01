@@ -233,6 +233,7 @@ def train(dataset_dir: PathLike,
         learning_rate=learning_rate,
         do_train=True,
         do_eval=True,
+        save_safetensors=False, # Required for the CNN
         dataloader_pin_memory=True,
         lr_scheduler_type=scheduler_type,
         warmup_ratio=warmup_ratio,
