@@ -210,7 +210,12 @@ class FramedVideoWrapper:
 
             return [torch.tensor(self.cache[self.cache_prefix+str(int(i))]) for i in frames]
 
-        return [torch.tensor(i) for i in self.frames[frames]]
+        all_frames = []
+        for i in range(len(frames)):
+            frame_data = self.frames[frames[i]]
+            all_frames.append(frame_data)
+
+        return [torch.tensor(i) for i in all_frames]
 
     def get_video(self, frames: npt.NDArray[int]):
         frame_data = self.get_frames(frames)
