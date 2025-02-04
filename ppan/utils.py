@@ -20,21 +20,22 @@ from rach3datautils.utils.dataset import DatasetUtils
 from timm import create_model
 
 import ppan.model_mae
-from ppan.config import PathLike, TEST_TRAIN_SPLIT
+from ppan.config import PathLike, PRETRAINED_MODEL_SMALL, PRETRAINED_MODEL_BASE
 from ppan.s2s import S2SNet
 
 
-ds_prefixes = Literal["r3x", "r3s", "pianoyt", "miditest"]
+ds_prefixes = Literal["r3x", "r3s", "pianoyt", "miditest", "omaps"]
 
 @dataclass
 class Sample:
-    midi_path: PathLike
+    midi_path: PathLike | None
     video_path: PathLike
     dataset: ds_prefixes
     bounding_box: Optional[tuple[int, int, int, int]] = None
     flac_path: Optional[PathLike] = None
     rotation_factor: float = 0
     rotate_180: bool = False
+    note_intervals: PathLike = None
 
 
 def load_rach3(root: PathLike, ds_prefix: ds_prefixes = "r3s"):
@@ -191,7 +192,7 @@ def load_all_data(rach3_s_dir: Optional[PathLike] = None,
     return test, train, miditest, pianoyt_test, rach3_s_test, rach3_x_test
 
 
-def load_omaps(root: PathLike) -> TEST_TRAIN_SPLIT:
+def load_omaps(root: PathLike) -> list[Sample]:
     """
     Load all samples for the OMAPS dataset for use with PPAN.
 
@@ -200,26 +201,32 @@ def load_omaps(root: PathLike) -> TEST_TRAIN_SPLIT:
     samples : list[SAMPLE_TYPE]
     """
     test_dir = os.path.join(root, "test")
-    train_dir = os.path.join(root, "train")
 
-    return _load_omaps_split(test_dir), _load_omaps_split(train_dir)
+    return _load_omaps_test(test_dir)
 
 
-def _load_omaps_split(root: PathLike) -> list[Sample]:
+def _load_omaps_test(root: PathLike) -> list[Sample]:
     """Load a train or test split for the OMAPS dataset.
     """
     videos = [os.path.join(root, i) for i in
               sorted(glob.glob("*.mp4", root_dir=root))]
     labels = [os.path.join(root, i) for i in
               sorted(glob.glob("*.txt", root_dir=root))]
-    none = [None for _ in videos]
-    true = [True for _ in videos]
-    false = [False for _ in videos]
-    samples = list(zip(none, none, videos, none, true, false, labels))
-    samples = calculate_bounding_boxes(
-        samples,
-        "./model_weights/piano-detector-yolov8s.pt"
-    )
+    with open(os.path.join(root, "omaps_bounding_boxes.json")) as f:
+        bbs = json.load(f)
+
+    samples = []
+    for key, val in bbs.items():
+        sample = Sample(
+            midi_path=None,
+            video_path=os.path.join(root, key + ".mp4"),
+            bounding_box=(int(val["y1"]), int(val["y2"]), int(val["x1"]), int(val["x2"])),
+            dataset="omaps",
+            rotate_180=val["rot"],
+            note_intervals=os.path.join(root, key + ".txt")
+        )
+        samples.append(sample)
+
     return samples
 
 
@@ -498,68 +505,74 @@ def get_backbone(config):
     num_classes = 88*2
     if config.pretrained_encoder == "cnn":
         return S2SNet(num_classes=num_classes)
-    if config.pretrained_encoder in ["vit_s", "vit_b"]:
-        model = create_model(
-            config.model,
-            img_size=config.image_size,
-            pretrained=False,
-            all_frames=config.num_frames,
-            tubelet_size=config.tubelet_size,
-            drop_rate=config.dropout,
-            drop_path_rate=config.drop_path,
-            attn_drop_rate=config.attn_drop_rate,
-            head_drop_rate=config.head_drop_rate,
-            drop_block_rate=None,
-            with_cp=False,
-            num_classes=num_classes # Onsets and frames
-        )
-        checkpoint = torch.hub.load_state_dict_from_url(
-            config.pretrained_encoder, map_location='cpu', check_hash=True)
+    elif config.pretrained_encoder == "vit_s":
+        pretrained_encoder = PRETRAINED_MODEL_SMALL
+    elif config.pretrained_encoder == "vit_b":
+        pretrained_encoder = PRETRAINED_MODEL_BASE
+    else:
+        pretrained_encoder = PRETRAINED_MODEL_SMALL
 
-        print("Load ckpt from %s" % config.model)
-        checkpoint_model = None
-        for model_key in config.model_key.split('|'):
-            if model_key in checkpoint:
-                checkpoint_model = checkpoint[model_key]
-                print("Load state_dict by model_key = %s" % model_key)
-                break
-        if checkpoint_model is None:
-            checkpoint_model = checkpoint
-        for old_key in list(checkpoint_model.keys()):
-            if old_key.startswith('_orig_mod.'):
-                new_key = old_key[10:]
-                checkpoint_model[new_key] = checkpoint_model.pop(old_key)
+    model = create_model(
+        config.model,
+        img_size=config.image_size,
+        pretrained=False,
+        all_frames=config.num_frames,
+        tubelet_size=config.tubelet_size,
+        drop_rate=config.dropout,
+        drop_path_rate=config.drop_path,
+        attn_drop_rate=config.attn_drop_rate,
+        head_drop_rate=config.head_drop_rate,
+        drop_block_rate=None,
+        with_cp=False,
+        num_classes=num_classes # Onsets and frames
+    )
+    checkpoint = torch.hub.load_state_dict_from_url(
+        pretrained_encoder, map_location='cpu', check_hash=True)
 
-        state_dict = model.state_dict()
-        for k in ['head_1.weight', 'head_1.bias']:
-            if k in checkpoint_model and checkpoint_model[
-                k].shape != state_dict[k].shape:
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
-        for k in ['head_2.weight', 'head_2.bias']:
-            if k in checkpoint_model and checkpoint_model[
-                k].shape != state_dict[k].shape:
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
+    print("Load ckpt from %s" % config.model)
+    checkpoint_model = None
+    for model_key in config.model_key.split('|'):
+        if model_key in checkpoint:
+            checkpoint_model = checkpoint[model_key]
+            print("Load state_dict by model_key = %s" % model_key)
+            break
+    if checkpoint_model is None:
+        checkpoint_model = checkpoint
+    for old_key in list(checkpoint_model.keys()):
+        if old_key.startswith('_orig_mod.'):
+            new_key = old_key[10:]
+            checkpoint_model[new_key] = checkpoint_model.pop(old_key)
 
-        all_keys = list(checkpoint_model.keys())
-        new_dict = OrderedDict()
-        for key in all_keys:
-            if key.startswith('backbone.'):
-                new_dict[key[9:]] = checkpoint_model[key]
-            elif key.startswith('encoder.'):
-                new_dict[key[8:]] = checkpoint_model[key]
-            else:
-                new_dict[key] = checkpoint_model[key]
-        checkpoint_model = new_dict
+    state_dict = model.state_dict()
+    for k in ['head_1.weight', 'head_1.bias']:
+        if k in checkpoint_model and checkpoint_model[
+            k].shape != state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint_model[k]
+    for k in ['head_2.weight', 'head_2.bias']:
+        if k in checkpoint_model and checkpoint_model[
+            k].shape != state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint_model[k]
 
-        load_state_dict(
-            model, checkpoint_model)
+    all_keys = list(checkpoint_model.keys())
+    new_dict = OrderedDict()
+    for key in all_keys:
+        if key.startswith('backbone.'):
+            new_dict[key[9:]] = checkpoint_model[key]
+        elif key.startswith('encoder.'):
+            new_dict[key[8:]] = checkpoint_model[key]
+        else:
+            new_dict[key] = checkpoint_model[key]
+    checkpoint_model = new_dict
 
-        n_parameters = sum(p.numel() for p in model.parameters()
-                           if p.requires_grad)
+    load_state_dict(
+        model, checkpoint_model)
 
-        print("Model = %s" % str(model))
-        print('number of params:', n_parameters)
+    n_parameters = sum(p.numel() for p in model.parameters()
+                       if p.requires_grad)
+
+    print("Model = %s" % str(model))
+    print('number of params:', n_parameters)
 
     return model

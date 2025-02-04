@@ -288,6 +288,13 @@ def main():
         required=False,
     )
     parser_eval.add_argument(
+        "-g", "--greyscale",
+        action="store",
+        default=os.environ.get("PPAN_EVAL_GREYSCALE", None),
+        help="Whether or not the model is greyscale.",
+        required=False,
+    )
+    parser_eval.add_argument(
         "-om", "--midi-output",
         action="store",
         default=os.environ.get("PPAN_EVAL_MIDI_OUTPUT", None),
