@@ -22,6 +22,7 @@ from timm import create_model
 import ppan.model_mae
 from ppan.config import PathLike, PRETRAINED_MODEL_SMALL, PRETRAINED_MODEL_BASE
 from ppan.s2s import S2SNet
+import ppan.video2roll
 
 
 ds_prefixes = Literal["r3x", "r3s", "pianoyt", "miditest", "omaps"]
@@ -509,6 +510,8 @@ def get_backbone(config):
         pretrained_encoder = PRETRAINED_MODEL_SMALL
     elif config.pretrained_encoder == "vit_b":
         pretrained_encoder = PRETRAINED_MODEL_BASE
+    elif config.pretrained_encoder == "cnn_v2r":
+        return ppan.video2roll.resnet18()
     else:
         pretrained_encoder = PRETRAINED_MODEL_SMALL
 
