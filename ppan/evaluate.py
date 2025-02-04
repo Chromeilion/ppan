@@ -66,7 +66,6 @@ def evaluate(preds_output: PathLike,
     _, _, miditest, pianoyt_test, rach3_s_test, rach3_x_test = load_all_data(
         rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir
     )
-    rach3_x_test = rach3_x_test[:3]
     omaps_test = load_omaps(os.environ["PPAN_OMAPS_DIR"])
     datasets = [rach3_x_test, omaps_test, rach3_s_test, miditest, pianoyt_test]
     dataset_names = ["r3x", "omaps", "r3s", "miditest", "pianoyt"]
