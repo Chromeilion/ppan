@@ -290,8 +290,9 @@ def main():
     parser_eval.add_argument(
         "-g", "--greyscale",
         action="store",
-        default=os.environ.get("PPAN_EVAL_GREYSCALE", None),
+        default=get_boolian_env(os.environ.get("PPAN_EVAL_GREYSCALE", None)),
         help="Whether or not the model is greyscale.",
+        type=str_to_bool,
         required=False,
     )
     parser_eval.add_argument(
