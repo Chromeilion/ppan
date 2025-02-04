@@ -66,7 +66,7 @@ class PPANConfig(PretrainedConfig):
             loss_clip = None,
             initializer_range: float = 0.02,
             weight_init: str = "normal",
-            model: str = "vit_small_patch16_224",
+            model: str = "vit_s",
             tubelet_size: int = 2,
             stochastic_depth: float = 0.,
             attn_drop_rate: float = 0.,
@@ -202,7 +202,8 @@ class PPANVideoProcessor(BaseVideoProcessor):
         if spatial_jitter:
             augs.append(v2.ScaleJitter(
                 target_size=(model_crop_resolution[1], model_crop_resolution[0]),
-                scale_range=(0.96, 1.001)
+                scale_range=(0.96, 1.001),
+                interpolation=v2.InterpolationMode.NEAREST
             ))
             augs.append(v2.RandomCrop(size=model_crop_resolution,
                                       pad_if_needed=True))
@@ -210,13 +211,13 @@ class PPANVideoProcessor(BaseVideoProcessor):
             augs.append(v2.RandomApply([v2.ColorJitter(brightness=0.1)],
                                        p=0.4))
         if rand_rotate:
-            augs.append(v2.RandomApply([v2.RandomRotation(0.5)], p=0.4))
+            augs.append(v2.RandomApply([v2.RandomRotation(0.2)], p=0.4))
         if grayscale:
             augs.append(v2.Grayscale(num_output_channels=3))
         if rand_erase:
             augs.append(v2.RandomErasing())
 
-        augs.append(v2.Resize(resolution))
+        augs.append(v2.Resize(resolution, interpolation=v2.InterpolationMode.NEAREST))
         augs.append(v2.ToDtype(torch.float32, scale=True))
         if gaussian_noise:
             augs.append(v2.RandomApply([v2.GaussianNoise()], p=0.4))
