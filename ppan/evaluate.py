@@ -288,6 +288,7 @@ def calc_perf_eval(pred_perf, true_perf):
     est_intervals, est_pitches = perf_to_int_pitch(pred_perf)
     ref_intervals, ref_pitches = perf_to_int_pitch(true_perf)
 
+    # Shift everything forward a little. Not 100% certain why this is needed
     est_intervals += 0.06
     est_intervals[:, 1] -= (est_intervals[:, 1] - est_intervals[:, 0]) * 0.06
 
