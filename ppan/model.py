@@ -90,6 +90,10 @@ class PPANConfig(PretrainedConfig):
             self.do_smoothing_frame = True
         if confidence_onset is not None:
             self.do_smoothing_onset = True
+        if image_size is None:
+            image_size = model_resolution
+        if num_frames is None:
+            num_frames = model_no_frames
 
         self.dropout = dropout
         self.drop_path = stochastic_depth

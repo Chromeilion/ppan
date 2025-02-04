@@ -508,12 +508,15 @@ def get_backbone(config):
         return S2SNet(num_classes=num_classes)
     elif config.pretrained_encoder == "vit_s":
         pretrained_encoder = PRETRAINED_MODEL_SMALL
+        config.model = "vit_small_patch16_224"
     elif config.pretrained_encoder == "vit_b":
         pretrained_encoder = PRETRAINED_MODEL_BASE
+        config.model = "vit_base_patch16_224"
     elif config.pretrained_encoder == "cnn_v2r":
         return ppan.video2roll.resnet18()
     else:
         pretrained_encoder = PRETRAINED_MODEL_SMALL
+        config.model = "vit_small_patch16_224"
 
     model = create_model(
         config.model,
