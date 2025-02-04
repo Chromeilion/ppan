@@ -35,7 +35,7 @@ class DatasetProcessor(IterableDataset):
             temporal_size: Optional[float] = None,
             dataset_max_framerate: Optional[int] = None,
             cachefile_name: Optional[str] = None,
-            step: Optional[int] = None
+            step: Optional[int] = None,
     ):
         """
         Parameters
@@ -114,7 +114,7 @@ class DatasetProcessor(IterableDataset):
             step=self.step,
             num_shards=num_gpus,
             pad_last_batch=True,
-            pad_sequences=True
+            pad_sequences=True,
         )
 
     @property
