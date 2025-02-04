@@ -67,8 +67,8 @@ def evaluate(preds_output: PathLike,
         rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir
     )
     omaps_test = load_omaps(os.environ["PPAN_OMAPS_DIR"])
-    datasets = [rach3_x_test, omaps_test, rach3_s_test, miditest, pianoyt_test]
-    dataset_names = ["r3x", "omaps", "r3s", "miditest", "pianoyt"]
+    datasets = [rach3_x_test, miditest, omaps_test, rach3_s_test, pianoyt_test]
+    dataset_names = ["r3x", "miditest", "omaps", "r3s", "pianoyt"]
 
     [evaluate_on_dataset(
         i,
@@ -93,7 +93,8 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
              "avg_frame_rate"].split("/")[0])
     if not preds_output.exists():
         processor = PPANVideoProcessor(
-            resolution=model.config.image_size
+            resolution=model.config.image_size,
+            grayscale=True,
         )
         chunk_size = 4 # in seconds
         dataset = DatasetProcessor(
@@ -192,8 +193,9 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
     pred_array = gaussian_filter(pred_array, axes=[0], sigma=sigma,
                                  radius=8)
     pred_array_mask = pred_array > threshold_onset
+    frame_kernal_radius = 4
     pred_array_frame = gaussian_filter(pred_array_frame, axes=[0], sigma=sigma_frames,
-                                 radius=4)
+                                 radius=frame_kernal_radius)
     pred_array_frame_mask = pred_array_frame > threshold_frame
     nonzero_preds = pred_array_mask.nonzero()
     nonzero_preds = list(zip(nonzero_preds[0], nonzero_preds[1]))
@@ -208,11 +210,17 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
         if y != p_y or x - 1 != pp_x:
             peak_idx = p_x + pred_array[p_x:pp_x+1, p_y].argmax() - 1
             pianoroll[peak_idx, p_y] = 1
+            peak_idx += 1
             current_frame = pred_array_frame_mask[peak_idx, p_y]
-            while current_frame == 1 and peak_idx < pred_array_frame.shape[0]-1:
+            while current_frame and peak_idx < pred_array_frame.shape[0]-frame_kernal_radius:
                 pianoroll[peak_idx, p_y] = 1
                 peak_idx += 1
                 current_frame = pred_array_frame_mask[peak_idx, p_y]
+                future_frames = pred_array_frame_mask[peak_idx:peak_idx+frame_kernal_radius+1, p_y]
+                # We need to compensate for the gaussian smoothing, which
+                # extends the offsets by some number of frames.
+                if not future_frames.all():
+                    break
             p_x = x
             p_y = y
         pp_x = x
