@@ -223,12 +223,14 @@ def main():
         action="store",
         help="Label smoothing confidence for frame predictions",
         default=os.environ.get("PPAN_TRAIN_LABEL_SMOOTHING_CONF_FRAME", None),
+        type=float
     )
     parser_train.add_argument(
         "-lso", "--label-smoothing-conf-onset",
         action="store",
         help="Label smoothing confidence for onset predictions",
         default=os.environ.get("PPAN_TRAIN_LABEL_SMOOTHING_CONF_ONSET", None),
+        type=float
     )
     parser_train.add_argument(
         "--model-architecture",
@@ -290,7 +292,7 @@ def main():
     parser_eval.add_argument(
         "-g", "--greyscale",
         action="store",
-        default=get_boolian_env(os.environ.get("PPAN_EVAL_GREYSCALE", None)),
+        default=get_boolian_env("PPAN_EVAL_GREYSCALE"),
         help="Whether or not the model is greyscale.",
         type=str_to_bool,
         required=False,
