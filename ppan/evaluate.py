@@ -14,7 +14,9 @@ from partitura.performance import PerformedPart, Performance
 from partitura.utils import pianoroll_to_notearray
 from rach3datautils.utils.multimedia import MultimediaTools
 from scipy.ndimage import gaussian_filter
+import torch
 from torch import no_grad
+import torch._dynamo
 from tqdm import tqdm
 
 from ppan.config import fps, temporal_res, device, model_no_frames
@@ -23,6 +25,8 @@ from ppan.midi import PPAnMidi
 from ppan.preprocessor import DatasetProcessor
 from ppan.model import PPANModel, PPANVideoProcessor
 
+# When compiling on non-supported hardware
+torch._dynamo.config.suppress_errors = True
 
 PathLike = Union[str, bytes, os.PathLike]
 
@@ -39,6 +43,7 @@ def evaluate(preds_output: PathLike,
              pianoyt_dir: Optional[PathLike] = None,
              miditest_dir: Optional[PathLike] = None,
              midi_output: Optional[PathLike] = None,
+             greyscale: Optional[bool] = None,
              threshold: Optional[float] = None,
              batch_size: Optional[int] = None,
              *_, **__):
@@ -57,6 +62,8 @@ def evaluate(preds_output: PathLike,
         threshold_frame = 0.5
     if batch_size is None:
         batch_size = 2
+    if greyscale is None:
+        greyscale = True
     else:
         batch_size = int(batch_size)
     gaussian_sigma = 0.2
@@ -74,6 +81,7 @@ def evaluate(preds_output: PathLike,
         i,
         dataset_name=j,
         model_checkpoint=model_checkpoint,
+        greyscale=greyscale,
         batch_size=batch_size,
         gaussian_sigma=gaussian_sigma,
         gaussian_sigma_frames=gaussian_sigma_frames,
@@ -83,18 +91,19 @@ def evaluate(preds_output: PathLike,
     ) for i, j in zip(datasets, dataset_names) if i is not None]
 
 
-def evaluate_on_dataset(samples, dataset_name, model_checkpoint, batch_size,
+def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batch_size,
                         gaussian_sigma, gaussian_sigma_frames, threshold_frame, threshold_onset, midi_output):
     preds_output = Path(dataset_name+"_preds.pkl")
     model = PPANModel.from_pretrained(
         model_checkpoint
     ).eval().to(device)
+    model = torch.compile(model, mode="reduce-overhead")
     fr = int(MultimediaTools().ff_probe(samples[0].video_path)["streams"][0][
              "avg_frame_rate"].split("/")[0])
     if not preds_output.exists():
         processor = PPANVideoProcessor(
             resolution=model.config.image_size,
-            grayscale=True,
+            grayscale=greyscale,
         )
         chunk_size = 4 # in seconds
         dataset = DatasetProcessor(
