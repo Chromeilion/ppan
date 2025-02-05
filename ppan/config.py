@@ -60,8 +60,8 @@ temporal_res = 1/fps
 processed_temporal_size = 64 * temporal_res
 processed_horizontal_res = 720
 
-PRETRAINED_MODEL_BASE = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/mae-b/pytorch_model.bin"
-PRETRAINED_MODEL_SMALL = "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/distill/vit_s_k710_dl_from_giant.pth"
+PRETRAINED_MODEL_BASE = environ.get("PPAN_MODEL_BASE_LOC", "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/mae-b/pytorch_model.bin")
+PRETRAINED_MODEL_SMALL = environ.get("PPAN_MODEL_SMALL_LOC", "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/distill/vit_s_k710_dl_from_giant.pth")
 
 # Default pretraining settings
 no_epochs = 10

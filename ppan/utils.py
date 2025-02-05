@@ -532,8 +532,11 @@ def get_backbone(config):
         with_cp=False,
         num_classes=num_classes # Onsets and frames
     )
-    checkpoint = torch.hub.load_state_dict_from_url(
-        pretrained_encoder, map_location='cpu', check_hash=True)
+    try:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            pretrained_encoder, map_location='cpu', check_hash=True)
+    except ValueError:
+        checkpoint = torch.load(pretrained_encoder, map_location='cpu')
 
     print("Load ckpt from %s" % config.model)
     checkpoint_model = None
