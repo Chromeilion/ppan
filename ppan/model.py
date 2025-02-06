@@ -242,14 +242,16 @@ class PPANCollate:
     def __call__(self, *args, **kwargs):
         batch = self.default_collate(*args, **kwargs)
         if "frame" in batch and self.config.do_smoothing_frame:
-            frame_p = batch["frames"] > 0.5
+            frame_p = batch["frames"] > 0.6
+            frame_n = batch["frames"] < 0.4
             batch["frames"][frame_p] = self.config.confidence_frame
-            batch["frames"][~frame_p] = 1 - self.config.confidence_frame
+            batch["frames"][frame_n] = 1 - self.config.confidence_frame
 
         if "onsets" in batch and self.config.do_smoothing_onset:
-            onset_p = batch["onsets"] > 0.5
+            onset_p = batch["onsets"] > 0.6
+            onset_n = batch["onsets"] < 0.4
             batch["onsets"][onset_p] = self.config.confidence_onset
-            batch["onsets"][~onset_p] = 1 - self.config.confidence_onset
+            batch["onsets"][onset_n] = 1 - self.config.confidence_onset
 
         if self.config.do_mixup:
             vid = Video(batch["pixel_values"])
