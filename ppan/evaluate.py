@@ -153,7 +153,7 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
         )
         pianoroll = pianoroll.astype(int) * 100
         session_files = [i for i in samples if os.path.basename(vid_path) in os.path.basename(str(i.video_path))][0]
-        vid_len = MultimediaTools().get_decoded_duration(session_files.video_path)
+        vid_len = float(MultimediaTools().ff_probe(session_files.video_path)["streams"][0]["duration"])
         if session_files.note_intervals is not None:
             labels = session_files.note_intervals
         elif session_files.midi_path is not None:
@@ -299,7 +299,6 @@ def calc_perf_eval(pred_perf, true_perf):
 
     # Shift everything forward a little. Not 100% certain why this is needed
     est_intervals += 0.06
-    est_intervals[:, 1] -= (est_intervals[:, 1] - est_intervals[:, 0]) * 0.06
 
     savedir = Path("./trans_res")
     savedir.mkdir(exist_ok=True)
