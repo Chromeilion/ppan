@@ -55,6 +55,7 @@ def train(dataset_dir: PathLike,
           model_architecture: Optional[str] = None,
           window_size: Optional[int] = None,
           image_size: Optional[int] = None,
+          skip_start_end: Optional[bool] = None,
           *_, **__):
     # The handling of default values is not done well right now, however it
     # works and we can change it later
@@ -180,7 +181,8 @@ def train(dataset_dir: PathLike,
         stride=finetune_default["stride"],
         window_size=window_size,
         lenience=finetune_default["lenience"],
-        shared_dict=shared_dict_train
+        shared_dict=shared_dict_train,
+        skip_start_end=finetune_default["skip_start_end"] if skip_start_end else None,
     )
     collate_fn = PPANCollate(config)
     if pretrained_checkpoint is not None:
