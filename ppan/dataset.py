@@ -65,6 +65,7 @@ class DatasetConfig:
     lenience: int
     shared_dict: Optional[dict[str, Any]] = None
     max_samples: Optional[int] = None
+    skip_start_end: Optional[tuple[int, int]] = None
 
 
 class PPANDataset(Dataset):
@@ -163,8 +164,13 @@ class ProcessedSampleWrapper:
 
     def get_samples(self):
         n_frames = self.video_wrapper.n_frames
+        start, end = 0, n_frames
+        if self.config.skip_start_end is not None:
+            start += self.config.skip_start_end[0]
+            end -= self.config.skip_start_end[1]
+
         half_window = self.config.window_size // 2
-        samples = list(range(half_window, n_frames-half_window))
+        samples = list(range(start+half_window, end-half_window))
         return samples
 
 

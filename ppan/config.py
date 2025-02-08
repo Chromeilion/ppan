@@ -67,6 +67,7 @@ PRETRAINED_MODEL_SMALL = environ.get("PPAN_MODEL_SMALL_LOC", "https://huggingfac
 no_epochs = 10
 finetune_default = {
     "architecture": "vit_s",
+    "skip_start_end": [480, 420],
     "optimizer": "adamw",
     "no_epochs": no_epochs,
     "batch_size": 96,

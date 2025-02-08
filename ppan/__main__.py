@@ -45,6 +45,14 @@ def main():
         required=False,
     )
     parser_train.add_argument(
+        "--skip-start-end",
+        action="store",
+        default=get_boolian_env("PPAN_TRAIN_SKIP_START_END"),
+        help="Whether to skip the beginning and ending of all videos. "
+             "To be used with PianoYT.",
+        required=False,
+    )
+    parser_train.add_argument(
         "-o", "--output-dir",
         action="store",
         default=os.environ.get("PPAN_TRAIN_OUTPUT_DIR", None),
