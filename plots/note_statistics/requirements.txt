@@ -1,0 +1,4 @@
+matplotlib
+partitura
+numpy
+git+https://github.com/neosatrapahereje/rach3datautils@main#egg=rach3datautils
