@@ -234,6 +234,35 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
             p_y = y
         pp_x = x
 
+    # This is the easiest place to put this plot, sorry :p
+#    import matplotlib.pyplot as plt
+#    import matplotlib.patches as mpatches
+#    import matplotlib as mpl
+#    plt.style.use('seaborn-v0_8')
+#    plt.rc('text', usetex=True)
+#    plt.rc('text.latex')
+#    mpl.rcParams['figure.dpi'] = 300
+#    frames_and_pianoroll = np.logical_and(pianoroll, pred_array_frame_mask)
+#    frames_no_pianoroll = np.logical_and(~pianoroll, pred_array_frame_mask)
+#
+#    fig, ax = plt.subplots(tight_layout=True)
+#    im_f = ax.imshow(frames_no_pianoroll.T[:, 1000:1200],
+#              cmap="Reds",
+#              alpha=frames_no_pianoroll.T[:, 1000:1200].astype(float),
+#              origin="lower")
+#    im = ax.imshow(frames_and_pianoroll.T[:, 1000:1200],
+#              cmap="Blues",
+#              alpha=frames_and_pianoroll.T[:, 1000:1200].astype(float),
+#              origin="lower")
+#    ax.set_xlabel("Frames")
+#    ax.set_ylabel("Notes")
+#    blue = im.cmap(im.norm(1))
+#    red = im_f.cmap(im_f.norm(1))
+#    patches = [mpatches.Patch(color=blue, label="Note Predictions"),
+#               mpatches.Patch(color=red, label="Rejected Frames")]
+#    ax.legend(handles=patches)
+#    ax.grid(False)
+#    fig.show()
     return pianoroll.T
 
 
