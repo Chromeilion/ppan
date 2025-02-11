@@ -176,6 +176,10 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
             midi_output = Path(midi_output)
             midi_output.mkdir(exist_ok=True)
             mid_output = midi_output/(vid_path.stem + ".mid")
+            pkl_output = midi_output/(vid_path.stem + ".pkl")
+            with open(pkl_output, "wb") as f:
+                pickle.dump(pianoroll, f)
+
             save_to_midi(pianoroll, str(mid_output))
     with open(f"./{dataset_name}_mir_stats.json", "w") as f:
         stats = [list(i/len(all_stats)) for i in mir_stats]
@@ -254,7 +258,7 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
 #              cmap="Blues",
 #              alpha=frames_and_pianoroll.T[:, 1000:1200].astype(float),
 #              origin="lower")
-#    ax.set_xlabel("Frames")
+#    ax.set_xlabel("Time Step")
 #    ax.set_ylabel("Notes")
 #    blue = im.cmap(im.norm(1))
 #    red = im_f.cmap(im_f.norm(1))
@@ -262,7 +266,7 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
 #               mpatches.Patch(color=red, label="Rejected Frames")]
 #    ax.legend(handles=patches)
 #    ax.grid(False)
-#    fig.show()
+#    fig.savefig("./onsets_frames.png")
     return pianoroll.T
 
 
@@ -347,7 +351,8 @@ def calc_perf_eval(pred_perf, true_perf):
         est_pitches=est_pitches,
         ref_intervals=ref_intervals,
         ref_pitches=ref_pitches,
-        offset_ratio=None
+        offset_ratio=None,
+        onset_tolerance=0.1
         ),
         mir_eval.transcription.offset_precision_recall_f1(
             est_intervals=est_intervals,
