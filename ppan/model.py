@@ -1,4 +1,5 @@
-from typing import Optional, Literal
+from typing import Optional
+from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
@@ -6,7 +7,6 @@ from transformers import PretrainedConfig, PreTrainedModel, DefaultDataCollator
 from ppan.config import (PRETRAINED_MODEL_SMALL, model_no_frames,
                          model_resolution, model_crop_resolution)
 from ppan.utils import get_backbone
-from ppan.dataset import BaseVideoProcessor
 from torchvision.tv_tensors import Video
 import torchvision.transforms.v2 as v2
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
@@ -51,6 +51,22 @@ FRAME_WEIGHTS = torch.tensor([
 # Therefore, I rescale everything here to be more reasonable.
 FRAME_WEIGHTS = ((FRAME_WEIGHTS / FRAME_WEIGHTS.min()).clamp(1, 3) + 1).tolist()
 ONSET_WEIGHTS = ((ONSET_WEIGHTS / ONSET_WEIGHTS.min()).clamp(1, 3) + 2).tolist()
+
+
+class BaseVideoProcessor(nn.Module, ABC):
+    """
+    Base video processor abstract class. Can be used to customize the video
+    processing behaviour of the PPANDataset class. Simply override the
+    process_video method.
+    """
+    @abstractmethod
+    @torch.compile(mode="reduce-overhead")
+    def process_video(self, img: torch.tensor) -> torch.tensor:
+        ...
+
+    def forward(self, x) -> torch.tensor:
+        return self.process_video(x)
+
 
 class PPANConfig(PretrainedConfig):
     model_type = "ppan"
@@ -166,7 +182,6 @@ class PPANModel(PreTrainedModel):
             loss += self.get_single_loss(logit_frame, frames, self.frame_loss_fn)
 
         return loss
-
 
     def get_single_loss(self, logits, labels, loss_fn):
         return loss_fn(logits, labels)

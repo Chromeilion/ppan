@@ -1,11 +1,11 @@
 import json
 import os
 import pickle
-import warnings
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
+from partitura.utils import pianoroll_to_notearray
 import mir_eval
 import numpy as np
 import torch.nn as nn
@@ -16,8 +16,7 @@ from torch import no_grad
 import torch._dynamo
 from tqdm import tqdm
 
-from ppan.config import fps, temporal_res, device
-from ppan.utils import load_all_data, load_omaps
+from ppan.config import fps, device
 from ppan.preprocessor import DatasetProcessor
 from ppan.model import PPANModel, PPANVideoProcessor
 
@@ -25,66 +24,6 @@ from ppan.model import PPANModel, PPANVideoProcessor
 torch._dynamo.config.suppress_errors = True
 
 PathLike = Union[str, bytes, os.PathLike]
-
-# This is used when saving predictions to ensure each prediction has a
-# unique name. It's not ideal obviously but just a quick way to get it working.
-global filecounter
-filecounter = 0
-
-
-def evaluate(preds_output: PathLike,
-             model_checkpoint: PathLike,
-             rach3_s_dir: Optional[PathLike] = None,
-             rach3_x_dir: Optional[PathLike] = None,
-             pianoyt_dir: Optional[PathLike] = None,
-             miditest_dir: Optional[PathLike] = None,
-             midi_output: Optional[PathLike] = None,
-             greyscale: Optional[bool] = None,
-             threshold: Optional[float] = None,
-             batch_size: Optional[int] = None,
-             *_, **__):
-    if not [i for i in [rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir] if i is not None]:
-        raise AttributeError("A dataset directory is required to run "
-                             "evaluation.")
-    if preds_output is None:
-        raise AttributeError("A path to the output file is required.")
-    if model_checkpoint is None:
-        warnings.warn("No model checkpoint passed. This is not an issue if "
-                      "the model predictions have already been calculated and "
-                      "the correct path to these predictions is passed in "
-                      "preds_output.")
-    if threshold is None:
-        threshold_onset = 0.5
-        threshold_frame = 0.5
-    if batch_size is None:
-        batch_size = 2
-    if greyscale is None:
-        greyscale = True
-    else:
-        batch_size = int(batch_size)
-    gaussian_sigma = 0.2
-    gaussian_sigma_frames = 0.5
-
-    # TODO: Get up to date with the rest of the codebase
-    _, _, miditest, pianoyt_test, rach3_s_test, rach3_x_test = load_all_data(
-        rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir
-    )
-    omaps_test = load_omaps(os.environ["PPAN_OMAPS_DIR"])
-    datasets = [pianoyt_test, rach3_x_test, rach3_s_test]
-    dataset_names = ["pianoyt", "r3x", "r3s"]
-
-    [evaluate_on_dataset(
-        i,
-        dataset_name=j,
-        model_checkpoint=model_checkpoint,
-        greyscale=greyscale,
-        batch_size=batch_size,
-        gaussian_sigma=gaussian_sigma,
-        gaussian_sigma_frames=gaussian_sigma_frames,
-        threshold_frame=threshold_frame,
-        threshold_onset=threshold_onset,
-        midi_output=midi_output
-    ) for i, j in zip(datasets, dataset_names) if i is not None]
 
 
 def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batch_size,
@@ -148,46 +87,25 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
             final_pred_onset, final_pred_frame, threshold_frame, threshold_onset, gaussian_sigma, gaussian_sigma_frames
         )
         pianoroll = pianoroll.astype(int) * 100
-        session_files = [i for i in samples if os.path.basename(vid_path) in os.path.basename(str(i.video_path))][0]
-        vid_len = float(MultimediaTools().ff_probe(session_files.video_path)["streams"][0]["duration"])
-        if session_files.note_intervals is not None:
-            labels = session_files.note_intervals
-        elif session_files.midi_path is not None:
-            labels = PPAnMidi(vid_len, temporal_res, 0)
-            labels.set_midi(session_files.midi_path)
-        else:
-            raise AttributeError(f"Missing midi or note intervals for {session_files.video_path}")
 
-        loc_mir_stats = calc_stats(
-            midi=labels,
-            pianoroll=pianoroll,
-            framerate=video_frame_rate
-        )
-        all_stats.append(loc_mir_stats)
-        all_vid_paths.append(vid_path)
-        for i, stats in enumerate(loc_mir_stats):
-            mir_stats[i] += np.array(stats)
-        if midi_output is not None:
-            vid_path = Path(vid_path)
-            midi_output = Path(midi_output)
-            midi_output.mkdir(exist_ok=True)
-            mid_output = midi_output/(vid_path.stem + ".mid")
-            pkl_output = midi_output/(vid_path.stem + ".pkl")
-            with open(pkl_output, "wb") as f:
-                pickle.dump(pianoroll, f)
+        vid_path = Path(vid_path)
+        midi_output = Path(midi_output)
+        midi_output.mkdir(exist_ok=True)
+        mid_output = midi_output/(vid_path.stem + ".mid")
+        pkl_output = midi_output/(vid_path.stem + ".pkl")
+        with open(pkl_output, "wb") as f:
+            pickle.dump(pianoroll, f)
 
             save_to_midi(pianoroll, str(mid_output))
     with open(f"./{dataset_name}_mir_stats.json", "w") as f:
         stats = [list(i/len(all_stats)) for i in mir_stats]
         json.dump({"full_note": stats[0], "onsets": stats[1], "offsets_no_pitch": stats[2]},
                   f, indent=4)
-#    np.save(f"./{dataset_name}_all_mir_stats", np.array(all_stats),
-#            allow_pickle=True)
-#    np.save(f"./{dataset_name}_all_mir_stats_files", np.array(all_vid_paths),
-#            allow_pickle=True)
 
 
-def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_frame, threshold_onset, sigma, sigma_frames) -> tuple[np.ndarray, np.ndarray]:
+def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_frame,
+                                     threshold_onset, sigma, sigma_frames,
+                                     frames_only: bool = False) -> np.ndarray:
     """Take model predictions and create an onset array (basically a
     pianoroll but with only onsets) and an offset array. When the model
     predicts a note over multiple frames, the peak predicted frame is used
@@ -213,7 +131,7 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
 
     pianoroll = np.zeros_like(pred_array, dtype=np.bool_)
 
-    if os.getenv("PPAN_FRAMES_ONLY") == "1":
+    if os.getenv("PPAN_FRAMES_ONLY") == "1" or frames_only:
         return pred_array_frame_mask.T
 
     p_x, p_y = nonzero_preds[0]
@@ -237,35 +155,6 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
             p_y = y
         pp_x = x
 
-    # This is the easiest place to put this plot, sorry :p
-#    import matplotlib.pyplot as plt
-#    import matplotlib.patches as mpatches
-#    import matplotlib as mpl
-#    plt.style.use('seaborn-v0_8')
-#    plt.rc('text', usetex=True)
-#    plt.rc('text.latex')
-#    mpl.rcParams['figure.dpi'] = 300
-#    frames_and_pianoroll = np.logical_and(pianoroll, pred_array_frame_mask)
-#    frames_no_pianoroll = np.logical_and(~pianoroll, pred_array_frame_mask)
-#
-#    fig, ax = plt.subplots(figsize=(9, 4), tight_layout=True)
-#    im_f = ax.imshow(frames_no_pianoroll.T[:, 1000:1200],
-#              cmap="Reds",
-#              alpha=frames_no_pianoroll.T[:, 1000:1200].astype(float),
-#              origin="lower")
-#    im = ax.imshow(frames_and_pianoroll.T[:, 1000:1200],
-#              cmap="Blues",
-#              alpha=frames_and_pianoroll.T[:, 1000:1200].astype(float),
-#              origin="lower")
-#    ax.set_xlabel("Time Step")
-#    ax.set_ylabel("Notes")
-#    blue = im.cmap(im.norm(1))
-#    red = im_f.cmap(im_f.norm(1))
-#    patches = [mpatches.Patch(color=blue, label="Note Predictions"),
-#               mpatches.Patch(color=red, label="Rejected Frames")]
-#    ax.legend(handles=patches)
-#    ax.grid(False)
-#    fig.savefig("./onsets_frames.png")
     return pianoroll.T
 
 

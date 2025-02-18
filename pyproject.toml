@@ -21,10 +21,8 @@ dependencies = [
     "pillow",
     "nvidia-dali-cuda120",
     "timm",
+    "partitura"
 ]
 
 [tool.setuptools.packages.find]
 include = ["ppan"]
-
-[project.scripts]
-ppan = "ppan.__main__:main"
