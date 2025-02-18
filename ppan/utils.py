@@ -19,9 +19,9 @@ ds_prefixes = Literal["r3x", "r3s", "pianoyt", "miditest", "omaps"]
 
 @dataclass
 class Sample:
-    midi_path: PathLike | None
     video_path: PathLike
     dataset: ds_prefixes
+    midi_path: PathLike | None = None
     bounding_box: Optional[tuple[int, int, int, int]] = None
     flac_path: Optional[PathLike] = None
     rotation_factor: float = 0
