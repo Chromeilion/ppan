@@ -28,7 +28,7 @@ PathLike = Union[str, bytes, os.PathLike]
 
 
 def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batch_size,
-                        gaussian_sigma, gaussian_sigma_frames, threshold_frame, threshold_onset, midi_output):
+                        gaussian_sigma, gaussian_sigma_frames, threshold_frame, threshold_onset):
     preds_output = Path(dataset_name+"_preds.pkl")
     model = PPANModel.from_pretrained(
         model_checkpoint
@@ -40,12 +40,12 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
             resolution=model.config.image_size,
             grayscale=greyscale,
         )
-        chunk_size = 4 # in seconds
+        chunk_size = batch_size # in seconds
         dataset = DatasetProcessor(
             datasets=samples,
             video_transform=processor,
             batch_size=1,
-            temporal_size=chunk_size, # 10 seconds
+            temporal_size=chunk_size,
             epoch_size=1,
             step=((chunk_size*fr)-model.config.num_frames), # a little overlap so that we don't miss any windows
             cachefile_name=f"{dataset_name}_cache.txt"
@@ -90,7 +90,7 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
         pianoroll = pianoroll.astype(int) * 100
 
         vid_path = Path(vid_path)
-        midi_output = Path(midi_output)
+        midi_output = Path("./midi")
         midi_output.mkdir(exist_ok=True)
         mid_output = midi_output/(vid_path.stem + ".mid")
         pkl_output = midi_output/(vid_path.stem + ".pkl")
