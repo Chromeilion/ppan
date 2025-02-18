@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "ppan"
 version = "0.1"
 description = "Piano performance video analysis."
-readme = "README.md"
 requires-python = ">=3.9"
 authors = [
     {name = "Anonymous"}
