@@ -5,7 +5,6 @@ from typing import Union, List, Optional, Tuple
 import numpy as np
 from torch import cuda, manual_seed, device
 
-load_dotenv()
 
 # Let's try to have some reproducibility
 seed: int = int(environ.get("PPAN_SEED", 42))
@@ -61,45 +60,3 @@ processed_horizontal_res = 720
 
 PRETRAINED_MODEL_BASE = environ.get("PPAN_MODEL_BASE_LOC", "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/mae-b/pytorch_model.bin")
 PRETRAINED_MODEL_SMALL = environ.get("PPAN_MODEL_SMALL_LOC", "https://huggingface.co/OpenGVLab/VideoMAE2/resolve/main/distill/vit_s_k710_dl_from_giant.pth")
-
-# Default pretraining settings
-no_epochs = 10
-finetune_default = {
-    "architecture": "vit_s",
-    "skip_start_end": [480, 420],
-    "optimizer": "adamw",
-    "no_epochs": no_epochs,
-    "batch_size": 96,
-    "lr_sgd": 0.25,
-    "lr_adamw": 1e-3,
-    "adam_beta1": 0.9,
-    "adam_beta2": 0.999,
-    "weight_decay": 0.05,
-    "warmup_ratio": 2.5/no_epochs,
-    "scheduler_type": "cosine",
-    "eval_every": 250,
-    "save_every": 250,
-    "frames_only": False,
-    "onsets_only": False,
-    "spatial_jitter": False,
-    "rand_erase": False,
-    "rand_rotate": False,
-    "rotate_180": False,
-    "gaussian_noise": False,
-    "grayscale": True,
-    "color_jitter": False,
-    "dropout": 0.,
-    "drop_path": 0.,
-    "momentum": 0.9,
-    "grad_clip": 1.,
-    "do_smoothing_frame": False,
-    "do_smoothing_onset": False,
-    "confidence_frame": None,
-    "confidence_onset": None,
-    "do_mixup": False,
-    "mixup_alpha": 0.2,
-    "stride": 1,
-    "window_size": 6,
-    "lenience": 1,
-    "image_size": None
-}
