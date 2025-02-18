@@ -3,7 +3,6 @@ from os import environ, PathLike
 from typing import Union, List, Optional, Tuple
 
 import numpy as np
-from dotenv import load_dotenv
 from torch import cuda, manual_seed, device
 
 load_dotenv()

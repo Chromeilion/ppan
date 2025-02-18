@@ -4,12 +4,13 @@ import pickle
 from collections import defaultdict
 from pathlib import Path
 from typing import Union
+import subprocess
 
+from partitura import save_performance_midi
 from partitura.utils import pianoroll_to_notearray
-import mir_eval
+from partitura.performance import Performance, PerformedPart
 import numpy as np
 import torch.nn as nn
-from rach3datautils.utils.multimedia import MultimediaTools
 from scipy.ndimage import gaussian_filter
 import torch
 from torch import no_grad
@@ -33,8 +34,7 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
         model_checkpoint
     ).eval().to(device)
     model = torch.compile(model, mode="reduce-overhead")
-    fr = int(MultimediaTools().ff_probe(samples[0].video_path)["streams"][0][
-             "avg_frame_rate"].split("/")[0])
+    fr = 30
     if not preds_output.exists():
         processor = PPANVideoProcessor(
             resolution=model.config.image_size,
@@ -72,10 +72,11 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
 
     mir_stats = [np.zeros(4), np.zeros(4), np.zeros(3)]
     all_stats = []
-    all_vid_paths = []
     for vid_path, preds in preds_rach3.items():
-        video_len = float(MultimediaTools().ff_probe(vid_path)["streams"][0]["duration"])
-        video_frame_rate = int(MultimediaTools().ff_probe(vid_path)["streams"][0]["avg_frame_rate"].split("/")[0])
+        video_len = float(subprocess.Popen(
+            f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {vid_path}",
+            shell=True, stdout=subprocess.PIPE).stdout.read().decode())
+        video_frame_rate = 30
         n_frames = round(video_len * video_frame_rate)
         model_half_window = model.config.num_frames // 2 + model.config.num_frames % 2
         preds = [i for i in preds if i[1] + model.config.num_frames < n_frames]
@@ -191,81 +192,6 @@ def save_to_midi(onset_array, name: str):
         )
     )
     save_performance_midi(performance_data=performance, out=name)
-
-
-def perf_to_int_pitch(perf):
-    if isinstance(perf, str):
-        intervals = []
-        notes = []
-        with open(perf, "r") as f:
-            for line in f:
-                line = [i.strip() for i in line.split("\t")]
-                intervals.append((float(line[0]), float(line[1])))
-                notes.append(mir_eval.util.midi_to_hz(int(line[2])))
-        return np.array(intervals), np.array(notes)
-    else:
-        intervals = np.array(
-            [[i['note_on'], i['note_off']] for i in perf[0].notes])
-        equal = np.where(intervals[:, 1] <= intervals[:, 0])
-        if equal:
-            intervals[equal, 1] += 0.0001
-        pitches = np.array(
-            [mir_eval.util.midi_to_hz(i['midi_pitch']) for i in perf[0].notes])
-        return intervals, pitches
-
-
-def calc_perf_eval(pred_perf, true_perf):
-    est_intervals, est_pitches = perf_to_int_pitch(pred_perf)
-    ref_intervals, ref_pitches = perf_to_int_pitch(true_perf)
-
-    # Shift everything forward a little. Not 100% certain why this is needed
-    est_intervals += 0.06
-
-    savedir = Path("./trans_res")
-    savedir.mkdir(exist_ok=True)
-    resdic = {"est_intervals": [list(i) for i in list(est_intervals.astype(float))],
-              "ref_intervals": [list(i) for i in list(ref_intervals.astype(float))],
-              "est_pitches": list(est_pitches.astype(float)),
-              "ref_pitches": list(ref_pitches.astype(float))}
-
-    return [mir_eval.transcription.precision_recall_f1_overlap(
-        est_intervals=est_intervals,
-        est_pitches=est_pitches,
-        ref_intervals=ref_intervals,
-        ref_pitches=ref_pitches
-    ),
-        mir_eval.transcription.precision_recall_f1_overlap(
-        est_intervals=est_intervals,
-        est_pitches=est_pitches,
-        ref_intervals=ref_intervals,
-        ref_pitches=ref_pitches,
-        offset_ratio=None,
-        onset_tolerance=0.1
-        ),
-        mir_eval.transcription.offset_precision_recall_f1(
-            est_intervals=est_intervals,
-            ref_intervals=ref_intervals,
-        ),
-    ]
-
-
-def calc_stats(midi: PPAnMidi, pianoroll: np.ndarray, framerate: int):
-    # MIR Eval stats
-    note_array_pred = pianoroll_to_notearray(pianoroll,
-                                             time_div=framerate,
-                                             time_unit="sec")
-    performance_pred = Performance(
-        PerformedPart.from_note_array(
-            note_array=note_array_pred
-        )
-    )
-    if isinstance(midi, PPAnMidi):
-        perf_true = midi.performance
-    else:
-        perf_true = midi
-    mir_scores = calc_perf_eval(performance_pred, perf_true)
-
-    return mir_scores
 
 
 def calc_time(preds, conf):
