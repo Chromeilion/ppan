@@ -9,9 +9,6 @@ from typing import Optional, Union
 import mir_eval
 import numpy as np
 import torch.nn as nn
-from partitura import save_performance_midi
-from partitura.performance import PerformedPart, Performance
-from partitura.utils import pianoroll_to_notearray
 from rach3datautils.utils.multimedia import MultimediaTools
 from scipy.ndimage import gaussian_filter
 import torch
@@ -19,9 +16,8 @@ from torch import no_grad
 import torch._dynamo
 from tqdm import tqdm
 
-from ppan.config import fps, temporal_res, device, model_no_frames
+from ppan.config import fps, temporal_res, device
 from ppan.utils import load_all_data, load_omaps
-from ppan.midi import PPAnMidi
 from ppan.preprocessor import DatasetProcessor
 from ppan.model import PPANModel, PPANVideoProcessor
 
@@ -74,8 +70,8 @@ def evaluate(preds_output: PathLike,
         rach3_s_dir, rach3_x_dir, pianoyt_dir, miditest_dir
     )
     omaps_test = load_omaps(os.environ["PPAN_OMAPS_DIR"])
-    datasets = [rach3_x_test, miditest, omaps_test, rach3_s_test, pianoyt_test]
-    dataset_names = ["r3x", "miditest", "omaps", "r3s", "pianoyt"]
+    datasets = [pianoyt_test, rach3_x_test, rach3_s_test]
+    dataset_names = ["pianoyt", "r3x", "r3s"]
 
     [evaluate_on_dataset(
         i,
@@ -217,6 +213,9 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
 
     pianoroll = np.zeros_like(pred_array, dtype=np.bool_)
 
+    if os.getenv("PPAN_FRAMES_ONLY") == "1":
+        return pred_array_frame_mask.T
+
     p_x, p_y = nonzero_preds[0]
     pp_x = p_x
     for x, y in nonzero_preds[1:]:
@@ -249,7 +248,7 @@ def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_fra
 #    frames_and_pianoroll = np.logical_and(pianoroll, pred_array_frame_mask)
 #    frames_no_pianoroll = np.logical_and(~pianoroll, pred_array_frame_mask)
 #
-#    fig, ax = plt.subplots(tight_layout=True)
+#    fig, ax = plt.subplots(figsize=(9, 4), tight_layout=True)
 #    im_f = ax.imshow(frames_no_pianoroll.T[:, 1000:1200],
 #              cmap="Reds",
 #              alpha=frames_no_pianoroll.T[:, 1000:1200].astype(float),

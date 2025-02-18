@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" serverName="orfeo" remoteFilesAllowedToDisappearOnAutoupload="false">
+  <component name="PublishConfigData" serverName="leonardo" remoteFilesAllowedToDisappearOnAutoupload="false">
     <serverData>
+      <paths name="leonardo">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/leonardo/home/userexternal/uzivanov/projects/ppan_proj/ppan" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
       <paths name="orfeo">
         <serverdata>
           <mappings>
