@@ -14,6 +14,7 @@ dependencies = [
     "numpy",
     "mido",
     "tqdm",
+    "scipy==1.14.1",
     "transformers[torch]==4.44.2",
     "matplotlib",
     "torchvision",

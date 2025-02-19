@@ -12,34 +12,29 @@ from partitura.performance import Performance, PerformedPart
 import numpy as np
 import torch.nn as nn
 from scipy.ndimage import gaussian_filter
-import torch
 from torch import no_grad
-import torch._dynamo
 from tqdm import tqdm
 
 from ppan.config import fps, device
 from ppan.preprocessor import DatasetProcessor
 from ppan.model import PPANModel, PPANVideoProcessor
 
-# When compiling on non-supported hardware
-torch._dynamo.config.suppress_errors = True
-
 PathLike = Union[str, bytes, os.PathLike]
 
 
 def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batch_size,
-                        gaussian_sigma, gaussian_sigma_frames, threshold_frame, threshold_onset):
+                        gaussian_sigma, gaussian_sigma_frames, threshold_frame, threshold_onset,
+                        frame_only: bool):
     preds_output = Path(dataset_name+"_preds.pkl")
     model = PPANModel.from_pretrained(
         model_checkpoint
     ).eval().to(device)
-    model = torch.compile(model, mode="reduce-overhead")
+    processor = PPANVideoProcessor(
+        resolution=model.config.image_size,
+        grayscale=greyscale,
+    )
     fr = 30
     if not preds_output.exists():
-        processor = PPANVideoProcessor(
-            resolution=model.config.image_size,
-            grayscale=greyscale,
-        )
         chunk_size = batch_size # in seconds
         dataset = DatasetProcessor(
             datasets=samples,
@@ -70,8 +65,18 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
 
         preds_rach3 = fixed_preds
 
-    mir_stats = [np.zeros(4), np.zeros(4), np.zeros(3)]
-    all_stats = []
+    chunk_size = 12/30
+    dataset_sample = next(iter(DatasetProcessor(
+        datasets=samples,
+        video_transform=processor,
+        batch_size=1,
+        temporal_size=chunk_size,
+        epoch_size=1,
+        step=((chunk_size * fr) - model.config.num_frames),
+        # a little overlap so that we don't miss any windows
+        cachefile_name=f"{dataset_name}_cache.txt"
+    )))
+
     for vid_path, preds in preds_rach3.items():
         video_len = float(subprocess.Popen(
             f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {vid_path}",
@@ -85,7 +90,8 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
         final_pred_onset = [(i[0], i[1][0].squeeze()) for i in final_pred]
         final_pred_frame = [(i[0], i[1][1].squeeze()) for i in final_pred]
         pianoroll = final_pred_to_onset_offset_array(
-            final_pred_onset, final_pred_frame, threshold_frame, threshold_onset, gaussian_sigma, gaussian_sigma_frames
+            final_pred_onset, final_pred_frame, threshold_frame, threshold_onset,
+            gaussian_sigma, gaussian_sigma_frames, frame_only
         )
         pianoroll = pianoroll.astype(int) * 100
 
@@ -98,10 +104,8 @@ def evaluate_on_dataset(samples, dataset_name, model_checkpoint, greyscale, batc
             pickle.dump(pianoroll, f)
 
             save_to_midi(pianoroll, str(mid_output))
-    with open(f"./{dataset_name}_mir_stats.json", "w") as f:
-        stats = [list(i/len(all_stats)) for i in mir_stats]
-        json.dump({"full_note": stats[0], "onsets": stats[1], "offsets_no_pitch": stats[2]},
-                  f, indent=4)
+
+    return pianoroll, dataset_sample
 
 
 def final_pred_to_onset_offset_array(final_pred, final_pred_frame, threshold_frame,
